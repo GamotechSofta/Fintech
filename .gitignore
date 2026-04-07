@@ -1,0 +1,132 @@
+# =========================================================
+# GLOBAL / COMMON
+# =========================================================
+.DS_Store
+Thumbs.db
+*.log
+logs/
+*.tmp
+*.swp
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+
+# =========================================================
+# ENVIRONMENT VARIABLES (CRITICAL)
+# =========================================================
+.env
+.env.*
+!.env.example
+
+# Keys / Secrets
+*.pem
+*.key
+*.crt
+*.p12
+
+# =========================================================
+# NODE.JS / BACKEND (EXPRESS / MERN)
+# =========================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+dist/
+build/
+out/
+
+# Coverage
+coverage/
+
+# Cache
+.cache/
+.next/
+.parcel-cache/
+
+# =========================================================
+# FRONTEND APPS (React - frontend/admin/bookie)
+# =========================================================
+frontend/node_modules/
+frontend/build/
+
+admin/node_modules/
+admin/build/
+
+bookie/node_modules/
+bookie/build/
+
+# Optional if using Vite
+frontend/dist/
+admin/dist/
+bookie/dist/
+
+# =========================================================
+# FLUTTER / DART
+# =========================================================
+.dart_tool/
+.packages
+.pub/
+.pub-cache/
+build/
+
+# Flutter specific
+.flutter-plugins
+.flutter-plugins-dependencies
+.metadata
+
+# =========================================================
+# FLUTTER - ANDROID
+# =========================================================
+android/.gradle/
+android/app/build/
+android/local.properties
+*.keystore
+*.jks
+
+# =========================================================
+# FLUTTER - iOS
+# =========================================================
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Runner.xcworkspace/
+ios/Runner.xcodeproj/project.xcworkspace/
+
+# =========================================================
+# FLUTTER - macOS
+# =========================================================
+macos/Pods/
+macos/Flutter/Flutter.framework
+
+# =========================================================
+# FLUTTER - WINDOWS
+# =========================================================
+windows/flutter/ephemeral/
+
+# =========================================================
+# FLUTTER - LINUX
+# =========================================================
+linux/flutter/ephemeral/
+
+# =========================================================
+# FLUTTER - WEB
+# =========================================================
+build/web/
+
+# =========================================================
+# OPTIONAL: DATABASE / LOCAL FILES
+# =========================================================
+*.sqlite
+*.db
+
+# =========================================================
+# OPTIONAL: TEST / DEBUG FILES
+# =========================================================
+*.test.js
+*.spec.js
