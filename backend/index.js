@@ -1,8 +1,8 @@
-import express from "express";
-import dotenv from "dotenv";
-import connectDB from "./config/db.js";
 import cors from "cors";
-import userRouter from "./routes/UserRoute.js";
+import dotenv from "dotenv";
+import express from "express";
+import connectDB from "./config/db.js";
+import smsReaderRouter from "./routes/SmsReaderRoute.js";
 dotenv.config();
 
 const app = express();
@@ -15,7 +15,9 @@ app.get("/", (req, res) => {
   res.send("Hello World");
 });
 await connectDB();
-app.use("/api/v1", userRouter);
+
+app.use("/api/v1", smsReaderRouter);
+
 app.listen(process.env.PORT, () => {
   console.log(`Server is running on port ${process.env.PORT}`);
 }); 
