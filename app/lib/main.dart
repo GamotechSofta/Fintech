@@ -6,13 +6,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_background_service_android/flutter_background_service_android.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:flutter_sms_inbox/flutter_sms_inbox.dart';
+import 'package:flutter_sms_inbox/flutter_sms_inbox.dart' hide SmsMessage;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:telephony/telephony.dart' as telephony;
 
 import 'login_screen.dart';
+import 'payment_screen.dart';
 import 'read_sms_screen.dart';
 
 const _bgChannelId = 'sms_sync_channel';
@@ -298,7 +300,13 @@ class MyApp extends StatelessWidget {
           required String username,
           required String userId,
           required String role,
-        }) => DashboardScreen(username: username, userId: userId, role: role),
+          required String token,
+        }) => DashboardScreen(
+          username: username,
+          userId: userId,
+          role: role,
+          token: token,
+        ),
       ),
     );
   }
@@ -310,11 +318,13 @@ class DashboardScreen extends StatefulWidget {
     required this.username,
     required this.userId,
     required this.role,
+    required this.token,
   });
 
   final String username;
   final String userId;
   final String role;
+  final String token;
 
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
@@ -322,7 +332,9 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   final SmsQuery _smsQuery = SmsQuery();
+  final telephony.Telephony _telephony = telephony.Telephony.instance;
   bool _isSyncingSms = false;
+  bool _isSmsListenerStarted = false;
   int _syncedCount = 0;
   final Set<String> _seenSmsKeys = {};
   Timer? _autoSyncTimer;
@@ -348,6 +360,100 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
+  Future<void> _startContinuousSmsListener() async {
+    if (_isSmsListenerStarted) return;
+    final smsStatus = await Permission.sms.status;
+    if (!smsStatus.isGranted) return;
+
+    _telephony.listenIncomingSms(
+      onNewMessage: (telephony.SmsMessage message) async {
+        await _processIncomingBankingSms(message);
+      },
+      listenInBackground: true,
+    );
+
+    _isSmsListenerStarted = true;
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Continuous banking SMS listener started')),
+    );
+  }
+
+  Future<void> _processIncomingBankingSms(telephony.SmsMessage sms) async {
+    final body = sms.body ?? '';
+    final sender = sms.address ?? 'UNKNOWN';
+    if (body.isEmpty || !_isLikelyBankingSms(body, sender)) return;
+
+    final baseUrl = _smsReaderBaseUrlFromEnv();
+    if (baseUrl.isEmpty) return;
+
+    final amount = _extractAmount(body);
+    final messageDate = sms.date != null
+        ? DateTime.fromMillisecondsSinceEpoch(sms.date!)
+        : DateTime.now();
+    final utr = _extractUtr(body);
+    if (utr == 'NA') return;
+
+    final payload = <String, dynamic>{
+      'transactionType': _extractTransactionType(body).toLowerCase(),
+      'amount': (amount ?? 0).toDouble(),
+      'bankAccountLastFourDigits': _extractLastFourDigits(body),
+      'transactionId': _extractTransactionId(body),
+      'utrNo': utr,
+      'date':
+          '${messageDate.year}-${messageDate.month.toString().padLeft(2, '0')}-${messageDate.day.toString().padLeft(2, '0')}',
+      'time':
+          '${messageDate.hour.toString().padLeft(2, '0')}:${messageDate.minute.toString().padLeft(2, '0')}:${messageDate.second.toString().padLeft(2, '0')}',
+      'senderID': sender.trim(),
+    };
+
+    final smsKey =
+        '${payload["senderID"]}|${payload["utrNo"]}|${payload["date"]}|${payload["time"]}|${payload["amount"]}|${payload["transactionType"]}';
+    if (_seenSmsKeys.contains(smsKey)) return;
+
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/sms-reader'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(payload),
+      );
+
+      if ((response.statusCode >= 200 && response.statusCode < 300) ||
+          response.statusCode == 409) {
+        _seenSmsKeys.add(smsKey);
+        if (mounted) {
+          setState(() {
+            _syncedCount += 1;
+          });
+        }
+        await _triggerPaymentsAndExtraction();
+      }
+    } catch (_) {
+      // Keep listener alive even if one network call fails.
+    }
+  }
+
+  Future<void> _triggerPaymentsAndExtraction() async {
+    final baseUrl = _smsReaderBaseUrlFromEnv();
+    if (baseUrl.isEmpty) return;
+
+    final token = widget.token.isNotEmpty ? widget.token : SessionStore.token;
+    if (token.isEmpty) return;
+
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/extract/bulk'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'jwtToken': token}),
+      );
+      debugPrint(
+        'Triggered payments->extraction pipeline status=${response.statusCode} body=${response.body}',
+      );
+    } catch (e) {
+      debugPrint('Failed to trigger payments->extraction pipeline: $e');
+    }
+  }
+
   Future<void> _askSmsPermission() async {
     await Permission.notification.request();
 
@@ -356,6 +462,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     // If already granted, do not prompt again. Android keeps it until user revokes.
     if (currentStatus.isGranted) {
       await _syncBankingSmsToBackend();
+      await _startContinuousSmsListener();
       return;
     }
 
@@ -402,6 +509,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         context,
       ).showSnackBar(const SnackBar(content: Text('SMS permission granted')));
       await _syncBankingSmsToBackend();
+      await _startContinuousSmsListener();
       return;
     }
 
@@ -674,6 +782,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 );
               },
               child: const Text('Read SMS'),
+            ),
+            const SizedBox(height: 8),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => PaymentScreen(token: widget.token),
+                  ),
+                );
+              },
+              child: const Text('Payments'),
             ),
             const SizedBox(height: 8),
           ],

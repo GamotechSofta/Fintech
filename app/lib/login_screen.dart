@@ -69,6 +69,7 @@ class LoginScreen extends StatefulWidget {
     required String username,
     required String userId,
     required String role,
+    required String token,
   })
   dashboardBuilder;
 
@@ -239,6 +240,7 @@ class _LoginScreenState extends State<LoginScreen> {
               username: authData['username'] ?? _usernameController.text.trim(),
               userId: authData['userId'] ?? '',
               role: authData['role'] ?? '',
+              token: authData['token'] ?? '',
             ),
           ),
         );

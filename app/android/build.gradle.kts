@@ -19,6 +19,18 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+// Compatibility fix for telephony plugin on newer AGP versions:
+// set missing namespace without using afterEvaluate.
+subprojects {
+    if (name == "telephony") {
+        plugins.withId("com.android.library") {
+            extensions.configure<com.android.build.gradle.LibraryExtension> {
+                namespace = "com.shounakmulay.telephony"
+            }
+        }
+    }
+}
+
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }

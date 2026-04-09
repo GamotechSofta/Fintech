@@ -2,6 +2,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import connectDB from "./config/db.js";
+import extractionRouter from "./routes/ExtractionRoute.js";
 import smsReaderRouter from "./routes/SmsReaderRoute.js";
 dotenv.config();
 
@@ -17,7 +18,8 @@ app.get("/", (req, res) => {
 await connectDB();
 
 app.use("/api/v1", smsReaderRouter);
+app.use("/api/v1", extractionRouter);
 
-app.listen(process.env.PORT, () => {
-  console.log(`Server is running on port ${process.env.PORT}`);
+app.listen(process.env.PORT, "0.0.0.0", () => {
+  console.log(`Server is running on http://0.0.0.0:${process.env.PORT}`);
 }); 

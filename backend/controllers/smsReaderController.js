@@ -117,7 +117,9 @@ export const createSmsRecord = async (req, res) => {
 
 export const createBulkSmsRecords = async (req, res) => {
   try {
-    const rawRecords = Array.isArray(req.body?.records)
+    const rawRecords = Array.isArray(req.body?.smsList)
+      ? req.body.smsList
+      : Array.isArray(req.body?.records)
       ? req.body.records
       : Array.isArray(req.body)
       ? req.body
@@ -126,7 +128,7 @@ export const createBulkSmsRecords = async (req, res) => {
     if (!rawRecords || rawRecords.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "records array is required",
+        message: "smsList or records array is required",
       });
     }
 
