@@ -28,14 +28,17 @@ const callVisionAPI = async (imageUrl) => {
   }
 
   if (!imageUrl) {
+    console.log("[OCR] Skipping Vision call: imageUrl missing");
     return null;
   }
 
   if (ocrCache.has(imageUrl)) {
+    console.log("[OCR] Cache hit for image:", imageUrl);
     return ocrCache.get(imageUrl);
   }
 
   try {
+    console.log("[OCR] Calling Vision API for image:", imageUrl);
     const response = await axios.post(
       `${VISION_API_URL}?key=${apiKey}`,
       {
@@ -56,6 +59,10 @@ const callVisionAPI = async (imageUrl) => {
 
     const fullText =
       response?.data?.responses?.[0]?.fullTextAnnotation?.text ?? null;
+    console.log(
+      "[OCR] Vision response received:",
+      fullText ? "text detected" : "no text detected",
+    );
     ocrCache.set(imageUrl, fullText);
     return fullText;
   } catch (error) {
@@ -66,8 +73,10 @@ const callVisionAPI = async (imageUrl) => {
 };
 
 const processOne = async ({ paymentId = "", imageUrl = "" }) => {
+  console.log("[OCR] Processing item:", { paymentId, imageUrl });
   const fullText = await callVisionAPI(imageUrl);
   if (!fullText) {
+    console.log("[OCR] Marking FAILED: OCR text missing", { paymentId, imageUrl });
     return {
       paymentId,
       imageUrl,
@@ -88,11 +97,12 @@ const processOne = async ({ paymentId = "", imageUrl = "" }) => {
     amount,
     status,
   };
-  console.log("OCR result:", result);
+  console.log("[OCR] Extracted result:", result);
   return result;
 };
 
 const saveExtractionResult = async (result) => {
+  console.log("[OCR] Saving extraction result for image:", result.imageUrl);
   const payload = {
     paymentId: result.paymentId || "",
     imageUrl: result.imageUrl,
@@ -106,17 +116,21 @@ const saveExtractionResult = async (result) => {
     payload,
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
+  console.log("[OCR] Save complete for image:", result.imageUrl);
 };
 
 // Explicit auto-save helper for extracted JSON payload.
 const autoSaveExtractionJson = async (result) => {
+  console.log("[OCR] Auto-save triggered for payment:", result.paymentId || "N/A");
   await saveExtractionResult(result);
   return result;
 };
 
 const processOneAndAutoSave = async (item) => {
+  console.log("[OCR] processOneAndAutoSave started");
   const result = await processOne(item);
   await autoSaveExtractionJson(result);
+  console.log("[OCR] processOneAndAutoSave completed");
   return result;
 };
 
@@ -125,29 +139,43 @@ const processBatch = async (items = []) => {
 };
 
 const runBatched = async (items = []) => {
+  console.log("[OCR] Running batched extraction. Total items:", items.length);
   const out = [];
   for (let i = 0; i < items.length; i += MAX_BATCH_SIZE) {
     const batch = items.slice(i, i + MAX_BATCH_SIZE);
+    console.log(
+      "[OCR] Processing batch:",
+      `${Math.floor(i / MAX_BATCH_SIZE) + 1}`,
+      "size:",
+      batch.length,
+    );
     const result = await processBatch(batch);
     out.push(...result);
   }
+  console.log("[OCR] Batched extraction complete. Total results:", out.length);
   return out;
 };
 
 const runBatchedAndAutoSave = async (items = []) => {
+  console.log("[OCR] runBatchedAndAutoSave started");
   const results = await runBatched(items);
   await Promise.all(results.map((result) => autoSaveExtractionJson(result)));
+  console.log("[OCR] runBatchedAndAutoSave completed");
   return results;
 };
 
 const getScreenshotItemsFromPayments = async (jwtToken) => {
+  console.log("[OCR] Fetching payment screenshots from payments API");
   const payments = await fetchPaymentsAmountAndScreenshot(jwtToken);
-  return payments
+  console.log("[OCR] Payments fetched:", payments.length);
+  const screenshotItems = payments
     .filter((item) => item?.screenshotUrl)
     .map((item, index) => ({
       paymentId: `payment_${index + 1}`,
       imageUrl: item.screenshotUrl,
     }));
+  console.log("[OCR] Payments with screenshots:", screenshotItems.length);
+  return screenshotItems;
 };
 
 export {

@@ -17,8 +17,9 @@
         <service
             android:name="id.flutter.flutter_background_service.BackgroundService"
             android:foregroundServiceType="dataSync"
+            android:stopWithTask="false"
             android:exported="true"
-            tools:replace="android:exported,android:foregroundServiceType" />
+            tools:replace="android:exported,android:foregroundServiceType,android:stopWithTask" />
 
         <activity
             android:name=".MainActivity"

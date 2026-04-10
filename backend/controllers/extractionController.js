@@ -1,12 +1,12 @@
 import {
   getScreenshotItemsFromPayments,
-  processOne,
-  runBatched,
-  saveExtractionResult,
+  processOneAndAutoSave,
+  runBatchedAndAutoSave,
 } from "../extraction.js";
 
 export const extractSingle = async (req, res) => {
   try {
+    console.log("[API] /extract called");
     const { paymentId, imageUrl } = req.body ?? {};
     if (!imageUrl) {
       return res.status(400).json({
@@ -15,8 +15,11 @@ export const extractSingle = async (req, res) => {
       });
     }
 
-    const result = await processOne({ paymentId, imageUrl });
-    await saveExtractionResult(result);
+    const result = await processOneAndAutoSave({ paymentId, imageUrl });
+    console.log("[API] /extract completed", {
+      paymentId: result.paymentId,
+      status: result.status,
+    });
     return res.status(200).json({
       paymentId: result.paymentId,
       utr: result.utr,
@@ -24,6 +27,7 @@ export const extractSingle = async (req, res) => {
       status: result.status,
     });
   } catch (error) {
+    console.error("[API] /extract failed:", error.message);
     return res.status(500).json({
       success: false,
       message: "Failed to process OCR extraction",
@@ -34,6 +38,7 @@ export const extractSingle = async (req, res) => {
 
 export const extractBulk = async (req, res) => {
   try {
+    console.log("[API] /extract/bulk called");
     const { items, imageUrls, jwtToken } = req.body ?? {};
     let inputItems = [];
 
@@ -57,10 +62,15 @@ export const extractBulk = async (req, res) => {
       });
     }
 
-    const results = await runBatched(inputItems);
-    await Promise.all(results.map((result) => saveExtractionResult(result)));
+    console.log("[API] /extract/bulk valid input items:", inputItems.length);
+    const results = await runBatchedAndAutoSave(inputItems);
     const successCount = results.filter((r) => r.status === "SUCCESS").length;
     const failedCount = results.length - successCount;
+    console.log("[API] /extract/bulk completed", {
+      total: results.length,
+      successCount,
+      failedCount,
+    });
 
     return res.status(200).json({
       success: true,
@@ -75,6 +85,7 @@ export const extractBulk = async (req, res) => {
       })),
     });
   } catch (error) {
+    console.error("[API] /extract/bulk failed:", error.message);
     return res.status(500).json({
       success: false,
       message: "Failed to process bulk OCR extraction",

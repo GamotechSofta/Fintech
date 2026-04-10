@@ -1,3 +1,4 @@
+import 'dart:async' show TimeoutException;
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -5,6 +6,10 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_sms_inbox/flutter_sms_inbox.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:telephony/telephony.dart' as telephony;
+
+import 'login_screen.dart';
+import 'sms_telephony_bridge.dart';
 
 String _normalizeBackendBaseUrl(String raw) {
   var url = raw.trim();
@@ -21,8 +26,67 @@ String _normalizeBackendBaseUrl(String raw) {
 String _smsReaderBaseUrlFromEnv() =>
     _normalizeBackendBaseUrl(dotenv.env['Backend_URL_LOCAL'] ?? '');
 
+String _smsReaderHostHint() {
+  final base = _smsReaderBaseUrlFromEnv();
+  if (base.isEmpty) return 'the API (set Backend_URL_LOCAL in app/.env)';
+  try {
+    final uri = Uri.parse(base);
+    if (uri.host.isEmpty) return 'the API';
+    return '${uri.host}${uri.hasPort ? ':${uri.port}' : ''}';
+  } catch (_) {
+    return 'the API';
+  }
+}
+
+/// User-facing text for HTTP/socket failures (avoids dumping ClientException stacks).
+String describeNetworkError(Object error) {
+  if (error is TimeoutException) {
+    return 'Request timed out. Check Wi‑Fi and that your backend is running.';
+  }
+  final raw = error.toString();
+  if (raw.contains('No route to host') ||
+      raw.contains('Network is unreachable') ||
+      raw.contains('Host is unreachable')) {
+    final host = _smsReaderHostHint();
+    return 'Cannot reach $host from this device. '
+        'Use the same Wi‑Fi as the machine running the server, turn off VPN, '
+        'and bind the API to 0.0.0.0 (not only 127.0.0.1).';
+  }
+  if (raw.contains('Connection refused')) {
+    return 'Connection refused. Start the backend and check the port in app/.env.';
+  }
+  if (raw.contains('Failed host lookup') ||
+      raw.contains('nodename nor servname') ||
+      raw.contains('Name or service not known')) {
+    return 'Could not resolve the server host. Check Backend_URL_LOCAL in app/.env.';
+  }
+  if (raw.contains('ClientException') || raw.contains('SocketException')) {
+    return 'Network error while contacting ${_smsReaderHostHint()}. '
+        'Check Wi‑Fi, Mac/Windows firewall, and that the URL matches this machine.';
+  }
+  if (raw.length > 280) {
+    return '${raw.substring(0, 280)}…';
+  }
+  return raw;
+}
+
 const int _bulkRetryChunkSize = 20;
 const Duration _bulkRequestTimeout = Duration(seconds: 60);
+
+/// True when the device cannot reach the server (retrying in smaller chunks does not help).
+bool _isTransportFailure(Object e) {
+  if (e is TimeoutException) return true;
+  final s = e.toString();
+  return s.contains('SocketException') ||
+      s.contains('ClientException') ||
+      s.contains('No route to host') ||
+      s.contains('Connection refused') ||
+      s.contains('Connection reset') ||
+      s.contains('Network is unreachable') ||
+      s.contains('Host is unreachable') ||
+      s.contains('Failed host lookup') ||
+      s.contains('Software caused connection abort');
+}
 
 class ReadSmsScreen extends StatefulWidget {
   const ReadSmsScreen({super.key});
@@ -100,6 +164,8 @@ class _ReadSmsScreenState extends State<ReadSmsScreen> {
   bool _saving = false;
   List<Map<String, dynamic>> _messages = const [];
   String? _error;
+  final Set<String> _seenIncomingSmsKeys = {};
+  bool _telephonyPushed = false;
 
   Map<String, dynamic> _sanitizeSmsPayload(Map<String, dynamic> smsData) {
     return <String, dynamic>{
@@ -189,7 +255,10 @@ class _ReadSmsScreenState extends State<ReadSmsScreen> {
         }
       } catch (singleError) {
         debugPrint("SMS BULK single request error: $singleError");
-        debugPrint("SMS BULK retrying in chunks");
+        if (_isTransportFailure(singleError)) {
+          rethrow;
+        }
+        debugPrint("SMS BULK retrying in chunks (non-network failure)");
         result = await _uploadBulkInChunks(records);
       }
 
@@ -198,6 +267,16 @@ class _ReadSmsScreenState extends State<ReadSmsScreen> {
       debugPrint(
         "SMS BULK upload done -> total=${records.length}, success=$totalSuccess, failed=$totalFailed",
       );
+      if (totalSuccess > 0) {
+        debugPrint(
+          "SMS BULK upload succeeded. Triggering payments->image extraction pipeline",
+        );
+        await _triggerPaymentsAndExtraction();
+      } else {
+        debugPrint(
+          "SMS BULK upload had no successful records. Skipping extraction trigger",
+        );
+      }
       if (showSnackBar && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -215,8 +294,9 @@ class _ReadSmsScreenState extends State<ReadSmsScreen> {
       if (showSnackBar && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Bulk SMS upload error: $e"),
+            content: Text(describeNetworkError(e)),
             backgroundColor: Colors.red,
+            duration: const Duration(seconds: 8),
           ),
         );
       }
@@ -316,8 +396,9 @@ class _ReadSmsScreenState extends State<ReadSmsScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Bulk upload error: $e'),
+          content: Text(describeNetworkError(e)),
           backgroundColor: Colors.red,
+          duration: const Duration(seconds: 8),
         ),
       );
     } finally {
@@ -409,6 +490,21 @@ class _ReadSmsScreenState extends State<ReadSmsScreen> {
     return 'NA';
   }
 
+  /// Same UTR rule as the dashboard telephony path (12-digit UTR).
+  String _extractUtrStrict(String body) {
+    final utrRegex = RegExp(
+      r'(?:utr|ref(?:erence)?(?:\s*no)?|transaction\s*id|txn\s*id)[\s:.-]*([A-Za-z0-9]{8,})',
+      caseSensitive: false,
+    );
+    final match = utrRegex.firstMatch(body);
+    if (match != null) {
+      final raw = match.group(1)!.trim();
+      final digitsOnly = raw.replaceAll(RegExp(r'[^0-9]'), '');
+      if (digitsOnly.length == 12) return digitsOnly;
+    }
+    return 'NA';
+  }
+
   String _extractLastFourDigits(String body) {
     final accountRegex = RegExp(
       r'(?:a/c|ac|acct|account)[^0-9]{0,10}(?:x+|\*+)?\s*([0-9]{4})',
@@ -426,6 +522,118 @@ class _ReadSmsScreenState extends State<ReadSmsScreen> {
       caseSensitive: false,
     );
     return idRegex.firstMatch(body)?.group(1)?.toUpperCase() ?? 'NA';
+  }
+
+  Future<void> _triggerPaymentsAndExtraction() async {
+    final baseUrl = _smsReaderBaseUrlFromEnv();
+    if (baseUrl.isEmpty) {
+      debugPrint('Read SMS: extraction trigger skipped (base URL missing)');
+      return;
+    }
+
+    final token = SessionStore.token;
+    if (token.isEmpty) {
+      debugPrint('Read SMS: extraction trigger skipped (token missing)');
+      return;
+    }
+
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/extract/bulk'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'jwtToken': token}),
+      );
+      debugPrint(
+        'Read SMS telephony: extraction pipeline status=${response.statusCode} body=${response.body}',
+      );
+    } catch (e) {
+      debugPrint('Read SMS telephony: extraction pipeline error: $e');
+    }
+  }
+
+  Future<void> _processIncomingBankingSms(telephony.SmsMessage sms) async {
+    final body = sms.body ?? '';
+    final sender = sms.address ?? 'UNKNOWN';
+    if (body.isEmpty || !_isLikelyBankingSms(body, sender)) {
+      debugPrint('Read SMS telephony: skipped non-banking/empty SMS');
+      return;
+    }
+
+    final baseUrl = _smsReaderBaseUrlFromEnv();
+    if (baseUrl.isEmpty) {
+      debugPrint('Read SMS telephony: skipped (base URL missing)');
+      return;
+    }
+
+    final amount = _extractAmount(body);
+    final messageDate = sms.date != null
+        ? DateTime.fromMillisecondsSinceEpoch(sms.date!)
+        : DateTime.now();
+    final utr = _extractUtrStrict(body);
+    if (utr == 'NA') {
+      debugPrint('Read SMS telephony: skipped (valid 12-digit UTR not found)');
+      return;
+    }
+
+    final payload = <String, dynamic>{
+      'transactionType': _extractTransactionType(body).toLowerCase(),
+      'amount': (amount ?? 0).toDouble(),
+      'bankAccountLastFourDigits': _extractLastFourDigits(body),
+      'transactionId': _extractTransactionId(body),
+      'utrNo': utr,
+      'date':
+          '${messageDate.year}-${messageDate.month.toString().padLeft(2, '0')}-${messageDate.day.toString().padLeft(2, '0')}',
+      'time':
+          '${messageDate.hour.toString().padLeft(2, '0')}:${messageDate.minute.toString().padLeft(2, '0')}:${messageDate.second.toString().padLeft(2, '0')}',
+      'senderID': sender.trim(),
+    };
+
+    final smsKey =
+        '${payload["senderID"]}|${payload["utrNo"]}|${payload["date"]}|${payload["time"]}|${payload["amount"]}|${payload["transactionType"]}';
+    if (_seenIncomingSmsKeys.contains(smsKey)) {
+      debugPrint('Read SMS telephony: skipped duplicate SMS key');
+      return;
+    }
+
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/sms-reader'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(payload),
+      );
+
+      if ((response.statusCode >= 200 && response.statusCode < 300) ||
+          response.statusCode == 409) {
+        _seenIncomingSmsKeys.add(smsKey);
+        if (mounted) {
+          final parsedData = <String, dynamic>{
+            "transactionType": _extractTransactionType(body),
+            "amount": amount ?? 0,
+            "accountLast4": _extractLastFourDigits(body),
+            "transactionId": _extractTransactionId(body),
+            "UTR": utr,
+            "utrNo": utr,
+            "date":
+                '${messageDate.year}-${messageDate.month.toString().padLeft(2, '0')}-${messageDate.day.toString().padLeft(2, '0')}',
+            "time":
+                '${messageDate.hour.toString().padLeft(2, '0')}:${messageDate.minute.toString().padLeft(2, '0')}:${messageDate.second.toString().padLeft(2, '0')}',
+            "sender": sender,
+            "senderID": sender,
+            "senderId": sender,
+          };
+          setState(() {
+            _messages = [parsedData, ..._messages];
+          });
+        }
+        await _triggerPaymentsAndExtraction();
+      } else {
+        debugPrint(
+          'Read SMS telephony: /sms-reader save failed status=${response.statusCode} body=${response.body}',
+        );
+      }
+    } catch (e) {
+      debugPrint('Read SMS telephony: /sms-reader call error: $e');
+    }
   }
 
   Future<void> _loadSms() async {
@@ -479,9 +687,11 @@ class _ReadSmsScreenState extends State<ReadSmsScreen> {
       setState(() {
         _messages = structured;
       });
-      sendBulkSmsToBackend(bulkPayload, showSnackBar: true).catchError((_) {
-        // Ignore network failures here so UI remains responsive.
-      });
+      if (!_telephonyPushed) {
+        SmsTelephonyBridge.pushHandler(_processIncomingBankingSms);
+        await SmsTelephonyBridge.ensureStarted();
+        _telephonyPushed = true;
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -500,6 +710,14 @@ class _ReadSmsScreenState extends State<ReadSmsScreen> {
   void initState() {
     super.initState();
     _loadSms();
+  }
+
+  @override
+  void dispose() {
+    if (_telephonyPushed) {
+      SmsTelephonyBridge.popHandler();
+    }
+    super.dispose();
   }
 
   @override

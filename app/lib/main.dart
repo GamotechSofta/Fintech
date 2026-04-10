@@ -16,9 +16,11 @@ import 'package:telephony/telephony.dart' as telephony;
 import 'login_screen.dart';
 import 'payment_screen.dart';
 import 'read_sms_screen.dart';
+import 'sms_telephony_bridge.dart';
 
 const _bgChannelId = 'sms_sync_channel';
 const _bgNotificationId = 9001;
+const _bgSyncIntervalSeconds = 30;
 
 String _normalizeBackendBaseUrl(String raw) {
   var url = raw.trim();
@@ -41,7 +43,11 @@ String _smsReaderBaseUrlFromEnv() =>
 @pragma('vm:entry-point')
 Future<void> onBackgroundServiceStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
+  debugPrint(
+    '[BG] Service started. Sync interval=${_bgSyncIntervalSeconds}s',
+  );
   service.on("stopService").listen((event) {
+    debugPrint('[BG] stopService received. Stopping background service');
     service.stopSelf();
   });
 
@@ -53,15 +59,22 @@ Future<void> onBackgroundServiceStart(ServiceInstance service) async {
     );
   }
 
-  Timer.periodic(const Duration(seconds: 30), (timer) async {
+  Timer.periodic(
+    const Duration(seconds: _bgSyncIntervalSeconds),
+    (timer) async {
+      debugPrint('[BG] Heartbeat tick #${timer.tick}');
     if (service is AndroidServiceInstance) {
       final isForeground = await service.isForegroundService();
       if (!isForeground) {
+        debugPrint('[BG] Promoting service back to foreground mode');
         service.setAsForegroundService();
       }
     }
+    debugPrint('[BG] Running background SMS sync');
     await runBackgroundSmsSync();
-  });
+    debugPrint('[BG] Background SMS sync completed');
+  },
+  );
 }
 
 Future<void> configureBackgroundService() async {
@@ -92,6 +105,11 @@ Future<void> configureBackgroundService() async {
     ),
     iosConfiguration: IosConfiguration(),
   );
+  // Ensure service is running even if autoStart timing is delayed.
+  final isRunning = await service.isRunning();
+  if (!isRunning) {
+    await service.startService();
+  }
 }
 
 Future<void> stopBackgroundServiceIfRunning() async {
@@ -183,14 +201,29 @@ String _extractTransactionIdGlobal(String body) {
 
 Future<void> runBackgroundSmsSync() async {
   final permission = await Permission.sms.status;
-  if (!permission.isGranted) return;
+  if (!permission.isGranted) {
+    print('[BG] SMS permission missing; skipping background sync');
+    return;
+  }
 
   final prefs = await SharedPreferences.getInstance();
-  final baseUrl = _smsReaderBaseUrlFromEnv();
-  if (baseUrl.isEmpty) return;
+  // Background isolate should not read dotenv directly.
+  final baseUrl = (prefs.getString('backend_url_local') ?? '').trim();
+  if (baseUrl.isEmpty) {
+    print('[BG] Backend base URL missing; skipping background sync');
+    return;
+  }
+  final authToken = prefs.getString('auth_token') ?? '';
 
   final seen = prefs.getStringList('bg_seen_sms_keys') ?? <String>[];
   final seenSet = seen.toSet();
+  var hasNewSavedSms = false;
+  var totalScanned = 0;
+  var bankingCandidates = 0;
+  var validUtrCount = 0;
+  var duplicateCount = 0;
+  var newDetectedCount = 0;
+  var savedCount = 0;
 
   final query = SmsQuery();
   final messages = await query.querySms(
@@ -199,14 +232,21 @@ Future<void> runBackgroundSmsSync() async {
   );
 
   for (final sms in messages) {
+    totalScanned += 1;
     final body = sms.body ?? '';
     final sender = sms.address ?? 'UNKNOWN';
+    final preview = body.replaceAll('\n', ' ').trim();
+    print(
+      '[BG] SMS read: sender=$sender bodyPreview=${preview.length > 80 ? "${preview.substring(0, 80)}..." : preview}',
+    );
     if (body.isEmpty || !_isLikelyBankingSmsGlobal(body, sender)) continue;
+    bankingCandidates += 1;
 
     final amount = _extractAmountGlobal(body) ?? 0;
     final smsDate = sms.date ?? DateTime.now();
     final utr = _extractUtrGlobal(body);
     if (utr == 'NA') continue;
+    validUtrCount += 1;
     final payload = <String, dynamic>{
       'transactionType': _extractTransactionTypeGlobal(body).toLowerCase(),
       'amount': amount.toDouble(),
@@ -241,7 +281,14 @@ Future<void> runBackgroundSmsSync() async {
 
     final smsKey =
         '${payload["senderID"]}|${payload["utrNo"]}|${payload["date"]}|${payload["time"]}|${payload["amount"]}|${payload["transactionType"]}';
-    if (seenSet.contains(smsKey)) continue;
+    if (seenSet.contains(smsKey)) {
+      duplicateCount += 1;
+      continue;
+    }
+    newDetectedCount += 1;
+    print(
+      '[BG] New SMS detected: sender=${payload["senderID"]} utr=${payload["utrNo"]} amount=${payload["amount"]}',
+    );
 
     final response = await http.post(
       Uri.parse('$baseUrl/sms-reader'),
@@ -256,10 +303,41 @@ Future<void> runBackgroundSmsSync() async {
     if ((response.statusCode >= 200 && response.statusCode < 300) ||
         response.statusCode == 409) {
       seenSet.add(smsKey);
+      hasNewSavedSms = true;
+      savedCount += 1;
     }
   }
 
   await prefs.setStringList('bg_seen_sms_keys', seenSet.take(3000).toList());
+  print(
+    '[BG] Sync summary: scanned=$totalScanned bankingCandidates=$bankingCandidates '
+    'validUtr=$validUtrCount newDetected=$newDetectedCount duplicates=$duplicateCount '
+    'saved=$savedCount',
+  );
+
+  if (hasNewSavedSms) {
+    if (authToken.isEmpty) {
+      print(
+        '[BG] New SMS saved, but auth token missing. Skipping extraction trigger',
+      );
+      return;
+    }
+    try {
+      final extractionResponse = await http.post(
+        Uri.parse('$baseUrl/extract/bulk'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'jwtToken': authToken}),
+      );
+      print(
+        '[BG] Triggered extraction from background. '
+        'status=${extractionResponse.statusCode} body=${extractionResponse.body}',
+      );
+    } catch (e) {
+      print('[BG] Failed to trigger extraction from background: $e');
+    }
+  } else {
+    print('[BG] No new banking SMS found in this sync tick');
+  }
 }
 
 Future<void> main() async {
@@ -278,8 +356,8 @@ Future<void> main() async {
     'backend_url_local',
     _smsReaderBaseUrlFromEnv(),
   );
-  // Background execution disabled by request.
-  await stopBackgroundServiceIfRunning();
+  // Enable background SMS sync service so inbox is processed without opening UI.
+  await configureBackgroundService();
   await SessionStore.load();
   runApp(const MyApp());
 }
@@ -331,13 +409,8 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  final SmsQuery _smsQuery = SmsQuery();
-  final telephony.Telephony _telephony = telephony.Telephony.instance;
-  bool _isSyncingSms = false;
   bool _isSmsListenerStarted = false;
-  int _syncedCount = 0;
   final Set<String> _seenSmsKeys = {};
-  Timer? _autoSyncTimer;
 
   @override
   void initState() {
@@ -345,32 +418,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _askSmsPermission());
   }
 
-  @override
-  void dispose() {
-    _autoSyncTimer?.cancel();
-    super.dispose();
-  }
-
-  void _startAutoSync() {
-    _autoSyncTimer?.cancel();
-    _autoSyncTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
-      final status = await Permission.sms.status;
-      if (!mounted || !status.isGranted) return;
-      await _syncBankingSmsToBackend(showSummary: false);
-    });
-  }
-
   Future<void> _startContinuousSmsListener() async {
     if (_isSmsListenerStarted) return;
     final smsStatus = await Permission.sms.status;
-    if (!smsStatus.isGranted) return;
+    if (!smsStatus.isGranted) {
+      debugPrint('Dashboard telephony: listener not started (SMS permission denied)');
+      return;
+    }
 
-    _telephony.listenIncomingSms(
-      onNewMessage: (telephony.SmsMessage message) async {
-        await _processIncomingBankingSms(message);
-      },
-      listenInBackground: true,
-    );
+    SmsTelephonyBridge.pushHandler(_processIncomingBankingSms);
+    await SmsTelephonyBridge.ensureStarted();
+    debugPrint('Dashboard telephony: listener started');
 
     _isSmsListenerStarted = true;
     if (!mounted) return;
@@ -382,17 +440,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Future<void> _processIncomingBankingSms(telephony.SmsMessage sms) async {
     final body = sms.body ?? '';
     final sender = sms.address ?? 'UNKNOWN';
-    if (body.isEmpty || !_isLikelyBankingSms(body, sender)) return;
+    if (body.isEmpty || !_isLikelyBankingSms(body, sender)) {
+      debugPrint('Dashboard telephony: skipped non-banking/empty SMS');
+      return;
+    }
 
     final baseUrl = _smsReaderBaseUrlFromEnv();
-    if (baseUrl.isEmpty) return;
+    if (baseUrl.isEmpty) {
+      debugPrint('Dashboard telephony: skipped (base URL missing)');
+      return;
+    }
 
     final amount = _extractAmount(body);
     final messageDate = sms.date != null
         ? DateTime.fromMillisecondsSinceEpoch(sms.date!)
         : DateTime.now();
     final utr = _extractUtr(body);
-    if (utr == 'NA') return;
+    if (utr == 'NA') {
+      debugPrint('Dashboard telephony: skipped (valid 12-digit UTR not found)');
+      return;
+    }
 
     final payload = <String, dynamic>{
       'transactionType': _extractTransactionType(body).toLowerCase(),
@@ -409,7 +476,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     final smsKey =
         '${payload["senderID"]}|${payload["utrNo"]}|${payload["date"]}|${payload["time"]}|${payload["amount"]}|${payload["transactionType"]}';
-    if (_seenSmsKeys.contains(smsKey)) return;
+    if (_seenSmsKeys.contains(smsKey)) {
+      debugPrint('Dashboard telephony: skipped duplicate SMS key');
+      return;
+    }
 
     try {
       final response = await http.post(
@@ -417,28 +487,36 @@ class _DashboardScreenState extends State<DashboardScreen> {
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(payload),
       );
+      debugPrint(
+        'Dashboard telephony: /sms-reader status=${response.statusCode} body=${response.body}',
+      );
 
       if ((response.statusCode >= 200 && response.statusCode < 300) ||
           response.statusCode == 409) {
         _seenSmsKeys.add(smsKey);
-        if (mounted) {
-          setState(() {
-            _syncedCount += 1;
-          });
-        }
+        debugPrint('Dashboard telephony: SMS saved, triggering extraction pipeline');
         await _triggerPaymentsAndExtraction();
+      } else {
+        debugPrint('Dashboard telephony: SMS save failed, extraction not triggered');
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Dashboard telephony: /sms-reader call error: $e');
       // Keep listener alive even if one network call fails.
     }
   }
 
   Future<void> _triggerPaymentsAndExtraction() async {
     final baseUrl = _smsReaderBaseUrlFromEnv();
-    if (baseUrl.isEmpty) return;
+    if (baseUrl.isEmpty) {
+      debugPrint('Dashboard telephony: extraction trigger skipped (base URL missing)');
+      return;
+    }
 
     final token = widget.token.isNotEmpty ? widget.token : SessionStore.token;
-    if (token.isEmpty) return;
+    if (token.isEmpty) {
+      debugPrint('Dashboard telephony: extraction trigger skipped (token missing)');
+      return;
+    }
 
     try {
       final response = await http.post(
@@ -461,7 +539,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     // If already granted, do not prompt again. Android keeps it until user revokes.
     if (currentStatus.isGranted) {
-      await _syncBankingSmsToBackend();
       await _startContinuousSmsListener();
       return;
     }
@@ -508,7 +585,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('SMS permission granted')));
-      await _syncBankingSmsToBackend();
       await _startContinuousSmsListener();
       return;
     }
@@ -612,140 +688,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return idRegex.firstMatch(body)?.group(1)?.toUpperCase() ?? 'NA';
   }
 
-  Future<void> _syncBankingSmsToBackend({bool showSummary = true}) async {
-    if (_isSyncingSms) return;
-
-    final baseUrl = _smsReaderBaseUrlFromEnv();
-    if (baseUrl.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Backend_URL_LOCAL is missing in app/.env'),
-        ),
-      );
-      return;
-    }
-
-    setState(() => _isSyncingSms = true);
-    var newAddedCount = 0;
-    var failedCount = 0;
-    var bankingCandidateCount = 0;
-
-    try {
-      final messages = await _smsQuery.querySms(
-        kinds: [SmsQueryKind.inbox],
-        count: 200,
-      );
-
-      for (final sms in messages) {
-        final body = sms.body ?? '';
-        final sender = sms.address ?? 'UNKNOWN';
-        if (body.isEmpty || !_isLikelyBankingSms(body, sender)) continue;
-        bankingCandidateCount++;
-
-        final amount = _extractAmount(body);
-
-        final smsDate = sms.date ?? DateTime.now();
-        final utr = _extractUtr(body);
-        if (utr == 'NA') continue;
-        final payload = <String, dynamic>{
-          'transactionType': _extractTransactionType(body).toLowerCase(),
-          'amount': (amount ?? 0).toDouble(),
-          'bankAccountLastFourDigits': _extractLastFourDigits(body),
-          'transactionId': _extractTransactionId(body),
-          'utrNo': utr,
-          'date':
-              '${smsDate.year}-${smsDate.month.toString().padLeft(2, '0')}-${smsDate.day.toString().padLeft(2, '0')}',
-          'time':
-              '${smsDate.hour.toString().padLeft(2, '0')}:${smsDate.minute.toString().padLeft(2, '0')}:${smsDate.second.toString().padLeft(2, '0')}',
-          'senderID': sender.trim(),
-        };
-
-        final hasAllRequired =
-            payload['utrNo'] != null &&
-            (payload['utrNo'] as String).isNotEmpty &&
-            payload['utrNo'] != 'NA' &&
-            payload['transactionType'] != null &&
-            (payload['transactionType'] as String).isNotEmpty &&
-            payload['bankAccountLastFourDigits'] != null &&
-            (payload['bankAccountLastFourDigits'] as String).isNotEmpty &&
-            payload['date'] != null &&
-            (payload['date'] as String).isNotEmpty &&
-            payload['time'] != null &&
-            (payload['time'] as String).isNotEmpty &&
-            payload['senderID'] != null &&
-            (payload['senderID'] as String).isNotEmpty;
-        if (!hasAllRequired) {
-          failedCount++;
-          debugPrint('SMS Sync skipped (missing required fields): $payload');
-          continue;
-        }
-
-        final smsKey =
-            '${payload["senderID"]}|${payload["utrNo"]}|${payload["date"]}|${payload["time"]}|${payload["amount"]}|${payload["transactionType"]}';
-        if (_seenSmsKeys.contains(smsKey)) {
-          continue;
-        }
-
-        final response = await http.post(
-          Uri.parse('$baseUrl/sms-reader'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode(payload),
-        );
-        debugPrint('SMS Sync POST $baseUrl/sms-reader payload=$payload');
-
-        dynamic responseBody;
-        try {
-          responseBody = response.body.isNotEmpty
-              ? jsonDecode(response.body)
-              : null;
-        } catch (_) {
-          responseBody = null;
-        }
-        debugPrint(
-          'SMS Sync response code=${response.statusCode} body=${response.body}',
-        );
-
-        final backendSuccess =
-            responseBody is Map<String, dynamic> &&
-            responseBody['success'] == true;
-        final treatedAsSynced =
-            (response.statusCode >= 200 && response.statusCode < 300) ||
-            response.statusCode == 409 ||
-            backendSuccess;
-
-        if (treatedAsSynced) {
-          // Mark as synced only after backend accepted/persisted it.
-          newAddedCount++;
-          _syncedCount++;
-          _seenSmsKeys.add(smsKey);
-        } else {
-          failedCount++;
-        }
-      }
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Failed to read/sync SMS')));
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isSyncingSms = false;
-        });
-        if (showSummary) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                'Scanned: $bankingCandidateCount | New: $newAddedCount | Total Synced: $_syncedCount | Failed: $failedCount',
-              ),
-            ),
-          );
-        }
-      }
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -762,19 +704,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             Text('ID: ${widget.userId.isEmpty ? '-' : widget.userId}'),
             Text('Role: ${widget.role.isEmpty ? '-' : widget.role}'),
             const SizedBox(height: 20),
-            ElevatedButton(
-              onPressed: _isSyncingSms ? null : _syncBankingSmsToBackend,
-              child: _isSyncingSms
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Text('Sync Banking SMS'),
-            ),
-            const SizedBox(height: 10),
-            Text('Records synced: $_syncedCount'),
-            const SizedBox(height: 16),
             ElevatedButton(
               onPressed: () {
                 Navigator.of(context).push(

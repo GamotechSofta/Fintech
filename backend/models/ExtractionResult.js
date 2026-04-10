@@ -19,6 +19,8 @@ const extractionResultSchema = new mongoose.Schema(
       required: false,
       trim: true,
       match: [/^\d{12}$/, "UTR must be exactly 12 digits"],
+      index: true,
+      unique: true,
     },
     amount: {
       type: Number,
