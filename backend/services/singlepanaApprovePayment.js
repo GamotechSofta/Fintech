@@ -13,6 +13,19 @@ const authHeaders = (jwt) => ({
   "Content-Type": "application/json",
 });
 
+/** API returns 404/HTML "Cannot POST …" when route is not registered — proceed without declare. */
+const isDeclareRouteMissing = (status, data) => {
+  const bodyStr =
+    typeof data === "string"
+      ? data
+      : data != null
+        ? JSON.stringify(data)
+        : "";
+  if (status === 404 || status === 405) return true;
+  if (bodyStr.includes("Cannot POST") || bodyStr.includes("Cannot GET")) return true;
+  return false;
+};
+
 /**
  * Singlepana expects Mongo payment _id in the path. Webhook refId is often `upload_<_id>`.
  */
@@ -100,19 +113,26 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
     })();
     console.log(`${LOG} 1) declare status=${declareRes.status} ok=${declareOk}`);
     if (!declareOk) {
-      console.error(
-        `${LOG} 1) declare FAILED — fix password/JWT/URL or set WEBHOOK_SKIP_DECLARE_PASSWORD=true. Response body:`,
-        bodyPreview,
-      );
-      return {
-        declare: {
-          ok: false,
-          status: declareRes.status,
-          data: declareRes.data,
-          hint: "Check WEBHOOK_APPROVE_DECLARE_PASSWORD matches admin secret; JWT must be allowed to declare",
-        },
-        decision: { ok: false, skipped: true, reason: "declare_not_ok" },
-      };
+      if (isDeclareRouteMissing(declareRes.status, declareRes.data)) {
+        console.warn(
+          `${LOG} 1) declare route not available on API (${declareRes.status}) — continuing without declare (approve/reject only)`,
+        );
+        declareOk = true;
+      } else {
+        console.error(
+          `${LOG} 1) declare FAILED — fix password/JWT or set WEBHOOK_SKIP_DECLARE_PASSWORD=true. Response body:`,
+          bodyPreview,
+        );
+        return {
+          declare: {
+            ok: false,
+            status: declareRes.status,
+            data: declareRes.data,
+            hint: "Check WEBHOOK_APPROVE_DECLARE_PASSWORD; JWT must be allowed to declare",
+          },
+          decision: { ok: false, skipped: true, reason: "declare_not_ok" },
+        };
+      }
     }
     if (declareRes.data && typeof declareRes.data === "object" && declareRes.data.success === false) {
       console.error(`${LOG} 1) declare HTTP 2xx but success=false`, declareRes.data);
@@ -160,9 +180,19 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
   const actionOk = actionRes.status >= 200 && actionRes.status < 300;
   console.log(`${LOG} 2) ${action} status=${actionRes.status} ok=${actionOk}`);
 
+  const softSkippedDeclare =
+    declareRes &&
+    declareOk &&
+    isDeclareRouteMissing(declareRes.status, declareRes.data);
+
   return {
     declare: declareRes
-      ? { ok: true, status: declareRes.status, data: declareRes.data }
+      ? {
+          ok: true,
+          status: declareRes.status,
+          data: declareRes.data,
+          softSkippedBecauseRouteMissing: Boolean(softSkippedDeclare),
+        }
       : { ok: true, skipped: true },
     decision: {
       action,

@@ -12,7 +12,6 @@ const extractionResultSchema = new mongoose.Schema(
       type: String,
       required: [true, "imageUrl is required"],
       trim: true,
-      index: true,
     },
     utr: {
       type: String,

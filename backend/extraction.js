@@ -114,7 +114,7 @@ const saveExtractionResult = async (result) => {
   await ExtractionResult.findOneAndUpdate(
     { imageUrl: payload.imageUrl },
     payload,
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );
   console.log("[OCR] Save complete for image:", result.imageUrl);
 };
