@@ -12,13 +12,13 @@ const extractionResultSchema = new mongoose.Schema(
       type: String,
       required: [true, "imageUrl is required"],
       trim: true,
+      unique: true,
     },
     utr: {
       type: String,
       required: false,
       trim: true,
       match: [/^\d{12}$/, "UTR must be exactly 12 digits"],
-      index: true,
       unique: true,
     },
     amount: {
@@ -36,9 +36,6 @@ const extractionResultSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
-
-// One OCR record per image URL; updates overwrite previous extraction result.
-extractionResultSchema.index({ imageUrl: 1 }, { unique: true });
 
 const ExtractionResult = mongoose.model(
   "ExtractionResult",

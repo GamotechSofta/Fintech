@@ -13,6 +13,12 @@ const authHeaders = (jwt) => ({
   "Content-Type": "application/json",
 });
 
+/** Singlepana expects this shape (see admin UI network tab), not `{ password }`. */
+const buildSinglepanaSecretBody = (adminRemarks, secretDeclarePassword) => ({
+  adminRemarks: adminRemarks ?? "",
+  secretDeclarePassword,
+});
+
 /** API returns 404/HTML "Cannot POST …" when route is not registered — proceed without declare. */
 const isDeclareRouteMissing = (status, data) => {
   const bodyStr =
@@ -64,8 +70,10 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
     .match(/^(1|true|yes)$/);
 
   const password = String(process.env.WEBHOOK_APPROVE_DECLARE_PASSWORD ?? "").trim();
-  if (!password && !skipDeclare) {
-    console.log(`${LOG} skipped (WEBHOOK_APPROVE_DECLARE_PASSWORD unset)`);
+  if (!password) {
+    console.log(
+      `${LOG} skipped (WEBHOOK_APPROVE_DECLARE_PASSWORD unset — required for secretDeclarePassword on declare/approve/reject)`,
+    );
     return { skipped: true, reason: "missing_declare_password_env" };
   }
 
@@ -75,7 +83,9 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
   const headers = authHeaders(token);
   const timeout = Number(process.env.WEBHOOK_APPROVE_TIMEOUT_MS || 25000);
 
-  const declareUrl = `${base}/admin/me/secret-declare-password-status`;
+  const declareUrl =
+    String(process.env.WEBHOOK_DECLARE_PASSWORD_URL || "").trim() ||
+    `${base}/admin/me/secret-declare-password-status`;
 
   let declareRes = null;
   let declareOk = false;
@@ -86,11 +96,13 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
     );
     declareOk = true;
   } else {
-    console.log(`${LOG} 1) POST secret-declare-password-status url=${declareUrl}`);
+    console.log(
+      `${LOG} 1) POST secret-declare-password-status url=${declareUrl}${process.env.WEBHOOK_DECLARE_PASSWORD_URL ? " (WEBHOOK_DECLARE_PASSWORD_URL)" : ""}`,
+    );
     try {
       declareRes = await axios.post(
         declareUrl,
-        { password },
+        buildSinglepanaSecretBody("", password),
         { headers, timeout, validateStatus: () => true },
       );
     } catch (err) {
@@ -115,12 +127,12 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
     if (!declareOk) {
       if (isDeclareRouteMissing(declareRes.status, declareRes.data)) {
         console.warn(
-          `${LOG} 1) declare route not available on API (${declareRes.status}) — continuing without declare (approve/reject only)`,
+          `${LOG} 1) declare: server has no POST at this URL (see Cannot POST in body). Continuing to approve/reject. If Singlepana added this route, set WEBHOOK_DECLARE_PASSWORD_URL to the exact URL or fix Backend_URL.`,
         );
         declareOk = true;
       } else {
         console.error(
-          `${LOG} 1) declare FAILED — fix password/JWT or set WEBHOOK_SKIP_DECLARE_PASSWORD=true. Response body:`,
+          `${LOG} 1) declare FAILED — check password/JWT. Response body:`,
           bodyPreview,
         );
         return {
@@ -150,12 +162,12 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
     typeof verification?.reason === "string"
       ? verification.reason
       : "UTR_or_amount_verification_failed";
+  const approveRemarks = String(
+    process.env.WEBHOOK_APPROVE_ADMIN_REMARKS ?? "",
+  ).trim();
   const actionBody = matched
-    ? {}
-    : {
-        adminRemarks: `Rejected: ${rejectReason}`,
-        reason: rejectReason,
-      };
+    ? buildSinglepanaSecretBody(approveRemarks, password)
+    : buildSinglepanaSecretBody(`Rejected: ${rejectReason}`, password);
 
   console.log(
     `${LOG} 2) POST payments/${paymentId}/${action} (refId=${refId} matched=${matched})`,
