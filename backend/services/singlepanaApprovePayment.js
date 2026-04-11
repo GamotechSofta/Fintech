@@ -44,9 +44,11 @@ export const toPaymentApiId = (refId) => {
 };
 
 /**
- * After webhook processing: declare password, then
- * - POST …/payments/:id/approve if verification matched (UTR + amounts)
- * - POST …/payments/:id/reject if not matched
+ * Singlepana routing (see api.singlepana.in):
+ * - GET  /api/v1/admin/me/secret-declare-password-status — status check (verifySuperAdmin); no body.
+ * - POST /api/v1/payments/:id/approve | reject — body { adminRemarks, secretDeclarePassword } (verifyAdmin).
+ *
+ * Fintech webhook calls these once per screenshot webhook, after OCR + verification, if JWT + password env are set.
  */
 export async function runSinglepanaPaymentDecisionAfterVerification({
   jwt,
@@ -92,19 +94,19 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
 
   if (skipDeclare) {
     console.warn(
-      `${LOG} 1) secret-declare-password-status SKIPPED (WEBHOOK_SKIP_DECLARE_PASSWORD=true) — only for debugging`,
+      `${LOG} 1) GET secret-declare-password-status SKIPPED (WEBHOOK_SKIP_DECLARE_PASSWORD=true)`,
     );
     declareOk = true;
   } else {
     console.log(
-      `${LOG} 1) POST secret-declare-password-status url=${declareUrl}${process.env.WEBHOOK_DECLARE_PASSWORD_URL ? " (WEBHOOK_DECLARE_PASSWORD_URL)" : ""}`,
+      `${LOG} 1) GET admin/me/secret-declare-password-status url=${declareUrl}${process.env.WEBHOOK_DECLARE_PASSWORD_URL ? " (WEBHOOK_DECLARE_PASSWORD_URL)" : ""}`,
     );
     try {
-      declareRes = await axios.post(
-        declareUrl,
-        buildSinglepanaSecretBody("", password),
-        { headers, timeout, validateStatus: () => true },
-      );
+      declareRes = await axios.get(declareUrl, {
+        headers,
+        timeout,
+        validateStatus: () => true,
+      });
     } catch (err) {
       console.error(`${LOG} 1) declare network error`, err.message);
       return {
@@ -125,9 +127,12 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
     })();
     console.log(`${LOG} 1) declare status=${declareRes.status} ok=${declareOk}`);
     if (!declareOk) {
-      if (isDeclareRouteMissing(declareRes.status, declareRes.data)) {
+      const softContinue =
+        declareRes.status === 403 ||
+        isDeclareRouteMissing(declareRes.status, declareRes.data);
+      if (softContinue) {
         console.warn(
-          `${LOG} 1) declare: server has no POST at this URL (see Cannot POST in body). Continuing to approve/reject. If Singlepana added this route, set WEBHOOK_DECLARE_PASSWORD_URL to the exact URL or fix Backend_URL.`,
+          `${LOG} 1) GET secret-declare-password-status not ok (status=${declareRes.status}) — often 403 if JWT is admin not super-admin, or route mismatch. Continuing to POST approve/reject.`,
         );
         declareOk = true;
       } else {
