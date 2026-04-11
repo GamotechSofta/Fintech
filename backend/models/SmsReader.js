@@ -56,6 +56,11 @@ const smsReaderSchema = new mongoose.Schema(
       trim: true,
       uppercase: true,
     },
+    check: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
   },
   { timestamps: true }
 );

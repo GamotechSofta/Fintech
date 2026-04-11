@@ -1,10 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:permission_handler/permission_handler.dart';
+
+import 'session_store.dart';
+import 'sms_ingest_service.dart';
 
 String _normalizeBackendBaseUrl(String raw) {
   var url = raw.trim();
@@ -20,47 +25,6 @@ String _normalizeBackendBaseUrl(String raw) {
 
 String _authBaseUrlFromEnv() =>
     _normalizeBackendBaseUrl(dotenv.env['BACKEND_URL'] ?? '');
-
-class SessionStore {
-  static String token = '';
-  static String userId = '';
-  static String username = '';
-  static String role = '';
-
-  static Future<void> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    token = prefs.getString('auth_token') ?? '';
-    userId = prefs.getString('auth_user_id') ?? '';
-    username = prefs.getString('auth_username') ?? '';
-    role = prefs.getString('auth_role') ?? '';
-  }
-
-  static Future<void> save({
-    required String savedToken,
-    required String savedUserId,
-    required String savedUsername,
-    required String savedRole,
-  }) async {
-    token = savedToken;
-    userId = savedUserId;
-    username = savedUsername;
-    role = savedRole;
-
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('auth_token', token);
-    await prefs.setString('auth_user_id', userId);
-    await prefs.setString('auth_username', username);
-    await prefs.setString('auth_role', role);
-  }
-
-  static Map<String, String> authHeaders() {
-    final headers = <String, String>{'Content-Type': 'application/json'};
-    if (token.isNotEmpty) {
-      headers['Authorization'] = 'Bearer $token';
-    }
-    return headers;
-  }
-}
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key, required this.dashboardBuilder});
@@ -85,6 +49,27 @@ class _LoginScreenState extends State<LoginScreen> {
   DateTime? _loginBlockedUntil;
   Timer? _loginCooldownTimer;
   int _retryAfterSeconds = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _requestSmsOnFirstLaunch());
+    }
+  }
+
+  /// SMS capture works when the app is killed only after OS permissions are granted.
+  Future<void> _requestSmsOnFirstLaunch() async {
+    await Permission.notification.request();
+    final status = await Permission.sms.status;
+    if (status.isGranted) {
+      await SmsIngestService.start();
+      return;
+    }
+    if (status.isPermanentlyDenied) return;
+    await Permission.sms.request();
+    await SmsIngestService.start();
+  }
 
   @override
   void dispose() {
@@ -233,6 +218,7 @@ class _LoginScreenState extends State<LoginScreen> {
           savedUsername: authData['username'] ?? _usernameController.text.trim(),
           savedRole: authData['role'] ?? '',
         );
+        await SmsIngestService.start();
 
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(

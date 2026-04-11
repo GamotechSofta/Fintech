@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 
-import 'login_screen.dart';
+import 'session_store.dart';
 
 String _paymentsEndpointFromEnv() {
   final raw = (dotenv.env['BACKEND_URL'] ?? '').trim();
