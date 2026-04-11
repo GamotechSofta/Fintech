@@ -46,8 +46,12 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
     return { skipped: true, reason: "missing_Backend_URL" };
   }
 
+  const skipDeclare = String(process.env.WEBHOOK_SKIP_DECLARE_PASSWORD || "")
+    .toLowerCase()
+    .match(/^(1|true|yes)$/);
+
   const password = String(process.env.WEBHOOK_APPROVE_DECLARE_PASSWORD ?? "").trim();
-  if (!password) {
+  if (!password && !skipDeclare) {
     console.log(`${LOG} skipped (WEBHOOK_APPROVE_DECLARE_PASSWORD unset)`);
     return { skipped: true, reason: "missing_declare_password_env" };
   }
@@ -60,29 +64,63 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
 
   const declareUrl = `${base}/admin/me/secret-declare-password-status`;
 
-  console.log(`${LOG} 1) POST secret-declare-password-status`);
-  let declareRes;
-  try {
-    declareRes = await axios.post(
-      declareUrl,
-      { password },
-      { headers, timeout, validateStatus: () => true },
-    );
-  } catch (err) {
-    console.error(`${LOG} 1) declare request error`, err.message);
-    return {
-      declare: { ok: false, error: err.message },
-      decision: { ok: false, skipped: true, reason: "declare_request_failed" },
-    };
-  }
+  let declareRes = null;
+  let declareOk = false;
 
-  const declareOk = declareRes.status >= 200 && declareRes.status < 300;
-  console.log(`${LOG} 1) declare status=${declareRes.status} ok=${declareOk}`);
-  if (!declareOk) {
-    return {
-      declare: { ok: false, status: declareRes.status, data: declareRes.data },
-      decision: { ok: false, skipped: true, reason: "declare_not_ok" },
-    };
+  if (skipDeclare) {
+    console.warn(
+      `${LOG} 1) secret-declare-password-status SKIPPED (WEBHOOK_SKIP_DECLARE_PASSWORD=true) — only for debugging`,
+    );
+    declareOk = true;
+  } else {
+    console.log(`${LOG} 1) POST secret-declare-password-status url=${declareUrl}`);
+    try {
+      declareRes = await axios.post(
+        declareUrl,
+        { password },
+        { headers, timeout, validateStatus: () => true },
+      );
+    } catch (err) {
+      console.error(`${LOG} 1) declare network error`, err.message);
+      return {
+        declare: { ok: false, error: err.message },
+        decision: { ok: false, skipped: true, reason: "declare_request_failed" },
+      };
+    }
+
+    declareOk = declareRes.status >= 200 && declareRes.status < 300;
+    const bodyPreview = (() => {
+      try {
+        const d = declareRes.data;
+        const s = typeof d === "string" ? d : JSON.stringify(d);
+        return s.length > 800 ? `${s.slice(0, 800)}…` : s;
+      } catch {
+        return String(declareRes.data);
+      }
+    })();
+    console.log(`${LOG} 1) declare status=${declareRes.status} ok=${declareOk}`);
+    if (!declareOk) {
+      console.error(
+        `${LOG} 1) declare FAILED — fix password/JWT/URL or set WEBHOOK_SKIP_DECLARE_PASSWORD=true. Response body:`,
+        bodyPreview,
+      );
+      return {
+        declare: {
+          ok: false,
+          status: declareRes.status,
+          data: declareRes.data,
+          hint: "Check WEBHOOK_APPROVE_DECLARE_PASSWORD matches admin secret; JWT must be allowed to declare",
+        },
+        decision: { ok: false, skipped: true, reason: "declare_not_ok" },
+      };
+    }
+    if (declareRes.data && typeof declareRes.data === "object" && declareRes.data.success === false) {
+      console.error(`${LOG} 1) declare HTTP 2xx but success=false`, declareRes.data);
+      return {
+        declare: { ok: false, status: declareRes.status, data: declareRes.data },
+        decision: { ok: false, skipped: true, reason: "declare_success_false" },
+      };
+    }
   }
 
   const action = matched ? "approve" : "reject";
@@ -112,7 +150,9 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
   } catch (err) {
     console.error(`${LOG} 2) ${action} request error`, err.message);
     return {
-      declare: { ok: true, status: declareRes.status },
+      declare: declareRes
+        ? { ok: true, status: declareRes.status, data: declareRes.data }
+        : { ok: true, skipped: true },
       decision: { action, ok: false, error: err.message },
     };
   }
@@ -121,7 +161,9 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
   console.log(`${LOG} 2) ${action} status=${actionRes.status} ok=${actionOk}`);
 
   return {
-    declare: { ok: true, status: declareRes.status, data: declareRes.data },
+    declare: declareRes
+      ? { ok: true, status: declareRes.status, data: declareRes.data }
+      : { ok: true, skipped: true },
     decision: {
       action,
       paymentId,
