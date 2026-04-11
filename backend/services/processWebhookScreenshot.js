@@ -5,7 +5,7 @@ import {
   matchSmsReaderToWebhookExtraction,
   verifySmsReaderWebhookConsistency,
 } from "../utils/smsReaderWebhookMatch.js";
-import { runSinglepanaApproveAfterVerification } from "./singlepanaApprovePayment.js";
+import { runSinglepanaPaymentDecisionAfterVerification } from "./singlepanaApprovePayment.js";
 import { getActiveLoginJwt } from "../utils/activeLoginJwtCache.js";
 
 const FORWARD_URL = process.env.WEBHOOK_FORWARD_URL;
@@ -62,17 +62,20 @@ export async function processWebhookScreenshotPayload(payload) {
   );
   console.log(`${LOG} C) triple verify done refId=${refId}`, verification);
 
-  let approveFlow = null;
-  if (verification?.matched === true) {
-    console.log(`${LOG} E) Singlepana approve (declare password + approve payment) refId=${refId}`);
-    approveFlow = await runSinglepanaApproveAfterVerification({
+  let paymentDecision = null;
+  if (verifyJwt) {
+    console.log(
+      `${LOG} E) Singlepana payment status: approve if verification matched, else reject refId=${refId}`,
+    );
+    paymentDecision = await runSinglepanaPaymentDecisionAfterVerification({
       jwt: verifyJwt,
       refId,
+      verification,
     });
-    console.log(`${LOG} E) approve flow result refId=${refId}`, approveFlow);
+    console.log(`${LOG} E) payment decision refId=${refId}`, paymentDecision);
   } else {
     console.log(
-      `${LOG} E) approve flow skipped (verification.matched !== true) refId=${refId}`,
+      `${LOG} E) approve/reject skipped (no JWT — log in on app or set PAYMENTS_VERIFY_JWT) refId=${refId}`,
     );
   }
 
@@ -116,5 +119,13 @@ export async function processWebhookScreenshotPayload(payload) {
   }
 
   console.log(`${LOG} ✓ pipeline complete refId=${refId}`);
-  return { extraction, verification, smsMatch, paymentsApiVerification, approveFlow };
+  return {
+    extraction,
+    verification,
+    smsMatch,
+    paymentsApiVerification,
+    paymentDecision,
+    /** @deprecated same as paymentDecision */
+    approveFlow: paymentDecision,
+  };
 }

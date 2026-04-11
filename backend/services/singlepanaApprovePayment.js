@@ -1,6 +1,6 @@
 import axios from "axios";
 
-const LOG = "[singlepana/approve]";
+const LOG = "[singlepana/payment-status]";
 
 const normalizeBaseUrl = (raw = "") => {
   const trimmed = String(raw).trim();
@@ -14,13 +14,29 @@ const authHeaders = (jwt) => ({
 });
 
 /**
- * After webhook verification passes: declare password session, then approve payment by refId.
- * Uses PAYMENTS_VERIFY_JWT (same Singlepana API JWT) and WEBHOOK_APPROVE_DECLARE_PASSWORD.
+ * Singlepana expects Mongo payment _id in the path. Webhook refId is often `upload_<_id>`.
  */
-export async function runSinglepanaApproveAfterVerification({ jwt, refId }) {
+export const toPaymentApiId = (refId) => {
+  const s = String(refId || "").trim();
+  if (s.toLowerCase().startsWith("upload_")) {
+    return s.slice("upload_".length);
+  }
+  return s;
+};
+
+/**
+ * After webhook processing: declare password, then
+ * - POST …/payments/:id/approve if verification matched (UTR + amounts)
+ * - POST …/payments/:id/reject if not matched
+ */
+export async function runSinglepanaPaymentDecisionAfterVerification({
+  jwt,
+  refId,
+  verification,
+}) {
   const token = String(jwt ?? "").trim();
   if (!token) {
-    console.log(`${LOG} skipped (no PAYMENTS_VERIFY_JWT)`);
+    console.log(`${LOG} skipped (no JWT)`);
     return { skipped: true, reason: "no_jwt" };
   }
 
@@ -36,21 +52,27 @@ export async function runSinglepanaApproveAfterVerification({ jwt, refId }) {
     return { skipped: true, reason: "missing_declare_password_env" };
   }
 
+  const paymentId = toPaymentApiId(refId);
+  const matched = verification?.matched === true;
+
   const headers = authHeaders(token);
   const timeout = Number(process.env.WEBHOOK_APPROVE_TIMEOUT_MS || 25000);
 
   const declareUrl = `${base}/admin/me/secret-declare-password-status`;
-  const approveUrl = `${base}/payments/${encodeURIComponent(refId)}/approve`;
 
   console.log(`${LOG} 1) POST secret-declare-password-status`);
   let declareRes;
   try {
-    declareRes = await axios.post(declareUrl, { password }, { headers, timeout, validateStatus: () => true });
+    declareRes = await axios.post(
+      declareUrl,
+      { password },
+      { headers, timeout, validateStatus: () => true },
+    );
   } catch (err) {
     console.error(`${LOG} 1) declare request error`, err.message);
     return {
       declare: { ok: false, error: err.message },
-      approve: { ok: false, skipped: true, reason: "declare_request_failed" },
+      decision: { ok: false, skipped: true, reason: "declare_request_failed" },
     };
   }
 
@@ -59,31 +81,62 @@ export async function runSinglepanaApproveAfterVerification({ jwt, refId }) {
   if (!declareOk) {
     return {
       declare: { ok: false, status: declareRes.status, data: declareRes.data },
-      approve: { ok: false, skipped: true, reason: "declare_not_ok" },
+      decision: { ok: false, skipped: true, reason: "declare_not_ok" },
     };
   }
 
-  console.log(`${LOG} 2) POST payments/${refId}/approve`);
-  let approveRes;
+  const action = matched ? "approve" : "reject";
+  const actionUrl = `${base}/payments/${encodeURIComponent(paymentId)}/${action}`;
+
+  const rejectReason =
+    typeof verification?.reason === "string"
+      ? verification.reason
+      : "UTR_or_amount_verification_failed";
+  const actionBody = matched
+    ? {}
+    : {
+        adminRemarks: `Rejected: ${rejectReason}`,
+        reason: rejectReason,
+      };
+
+  console.log(
+    `${LOG} 2) POST payments/${paymentId}/${action} (refId=${refId} matched=${matched})`,
+  );
+  let actionRes;
   try {
-    approveRes = await axios.post(approveUrl, {}, { headers, timeout, validateStatus: () => true });
+    actionRes = await axios.post(actionUrl, actionBody, {
+      headers,
+      timeout,
+      validateStatus: () => true,
+    });
   } catch (err) {
-    console.error(`${LOG} 2) approve request error`, err.message);
+    console.error(`${LOG} 2) ${action} request error`, err.message);
     return {
       declare: { ok: true, status: declareRes.status },
-      approve: { ok: false, error: err.message },
+      decision: { action, ok: false, error: err.message },
     };
   }
 
-  const approveOk = approveRes.status >= 200 && approveRes.status < 300;
-  console.log(`${LOG} 2) approve status=${approveRes.status} ok=${approveOk}`);
+  const actionOk = actionRes.status >= 200 && actionRes.status < 300;
+  console.log(`${LOG} 2) ${action} status=${actionRes.status} ok=${actionOk}`);
 
   return {
     declare: { ok: true, status: declareRes.status, data: declareRes.data },
-    approve: {
-      ok: approveOk,
-      status: approveRes.status,
-      data: approveRes.data,
+    decision: {
+      action,
+      paymentId,
+      ok: actionOk,
+      status: actionRes.status,
+      data: actionRes.data,
     },
   };
+}
+
+/** @deprecated use runSinglepanaPaymentDecisionAfterVerification */
+export async function runSinglepanaApproveAfterVerification({ jwt, refId }) {
+  return runSinglepanaPaymentDecisionAfterVerification({
+    jwt,
+    refId,
+    verification: { matched: true },
+  });
 }

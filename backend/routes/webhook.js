@@ -131,7 +131,8 @@ webhookRouter.post("/webhook/screenshot-uploaded", async (req, res) => {
         smsMatch: result.smsMatch,
         verification: result.verification,
         paymentsApiVerification: result.paymentsApiVerification,
-        approveFlow: result.approveFlow,
+        paymentDecision: result.paymentDecision,
+        approveFlow: result.paymentDecision,
       });
     } catch (processError) {
       console.error(
