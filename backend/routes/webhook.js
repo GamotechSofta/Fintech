@@ -15,7 +15,21 @@ const normalizePayload = (body = {}) => ({
       ? undefined
       : Number(body.amount),
   utr: body.utr ? String(body.utr).trim() : undefined,
+  jwtToken: String(
+    body.jwtToken || body.token || body.appJwt || body.accessToken || "",
+  ).trim(),
 });
+
+/** App login JWT: header wins over body; used for payments verify + approve (fallback: PAYMENTS_VERIFY_JWT). */
+const resolveAppJwtForWebhook = (req, payload) => {
+  const fromHeader = String(req.header("x-app-jwt") || "").trim();
+  if (fromHeader) return fromHeader;
+  const appAuth = req.header("x-app-authorization");
+  if (appAuth && /^Bearer\s+/i.test(String(appAuth))) {
+    return String(appAuth).replace(/^Bearer\s+/i, "").trim();
+  }
+  return String(payload.jwtToken || "").trim();
+};
 
 const validatePayload = (payload) => {
   const errors = [];
@@ -52,11 +66,14 @@ webhookRouter.post("/webhook/screenshot-uploaded", async (req, res) => {
     console.log(`${LOG} ✓ HMAC OK`);
 
     const payload = normalizePayload(req.body);
+    const appJwt = resolveAppJwtForWebhook(req, payload);
+    const processingPayload = { ...payload, jwtToken: appJwt };
     console.log(`${LOG} ③ normalized payload`, {
       refId: payload.refId,
       screenshotUrl: payload.screenshotUrl ? `${payload.screenshotUrl.slice(0, 80)}…` : "",
       amount: payload.amount,
       utr: payload.utr,
+      appJwt: appJwt ? "present (x-app-jwt or body)" : "absent",
     });
     const errors = validatePayload(payload);
     if (errors.length > 0) {
@@ -69,7 +86,12 @@ webhookRouter.post("/webhook/screenshot-uploaded", async (req, res) => {
       await WebhookEvent.create({
         refId: payload.refId,
         status: "pending",
-        payload,
+        payload: {
+          refId: payload.refId,
+          screenshotUrl: payload.screenshotUrl,
+          amount: payload.amount,
+          utr: payload.utr,
+        },
       });
       console.log(`${LOG} ④ WebhookEvent created status=pending refId=${payload.refId}`);
     } catch (error) {
@@ -83,7 +105,7 @@ webhookRouter.post("/webhook/screenshot-uploaded", async (req, res) => {
 
     try {
       console.log(`${LOG} ⑤ start processWebhookScreenshotPayload refId=${payload.refId}`);
-      const result = await processWebhookScreenshotPayload(payload);
+      const result = await processWebhookScreenshotPayload(processingPayload);
       await WebhookEvent.updateOne(
         { refId: payload.refId },
         {
@@ -96,7 +118,7 @@ webhookRouter.post("/webhook/screenshot-uploaded", async (req, res) => {
       );
       const latencyMs = Date.now() - requestAt;
       console.log(
-        `${LOG} ⑥ SUCCESS refId=${payload.refId} latencyMs=${latencyMs} extraction.status=${result.extraction?.status} smsMatch.matched=${result.smsMatch?.matched}`,
+        `${LOG} ⑥ SUCCESS refId=${payload.refId} latencyMs=${latencyMs} extraction.status=${result.extraction?.status} smsMatch.matched=${result.smsMatch?.matched} verification.matched=${result.verification?.matched}`,
       );
       return res.status(200).json({
         success: true,
@@ -107,7 +129,9 @@ webhookRouter.post("/webhook/screenshot-uploaded", async (req, res) => {
           status: result.extraction.status,
         },
         smsMatch: result.smsMatch,
-        paymentsVerification: result.verification,
+        verification: result.verification,
+        paymentsApiVerification: result.paymentsApiVerification,
+        approveFlow: result.approveFlow,
       });
     } catch (processError) {
       console.error(

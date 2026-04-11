@@ -8,6 +8,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 
+import 'backend_session_sync.dart';
 import 'session_store.dart';
 import 'sms_ingest_service.dart';
 
@@ -218,6 +219,7 @@ class _LoginScreenState extends State<LoginScreen> {
           savedUsername: authData['username'] ?? _usernameController.text.trim(),
           savedRole: authData['role'] ?? '',
         );
+        await registerLoginJwtWithFintechBackend();
         await SmsIngestService.start();
 
         Navigator.of(context).pushReplacement(

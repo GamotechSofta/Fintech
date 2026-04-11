@@ -3,6 +3,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'backend_session_sync.dart';
 import 'login_screen.dart';
 import 'payment_screen.dart';
 import 'session_store.dart';
@@ -44,6 +45,7 @@ Future<void> main() async {
     _smsReaderBaseUrlFromEnv(),
   );
   await SessionStore.load();
+  await registerLoginJwtWithFintechBackend();
   // So SMS is handled even when UI (e.g. dashboard) is not open — after kill, screen off, etc.
   await SmsIngestService.start();
   runApp(const MyApp());

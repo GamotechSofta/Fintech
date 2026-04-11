@@ -5,6 +5,7 @@ import connectDB from "./config/db.js";
 import extractionRouter from "./routes/ExtractionRoute.js";
 import smsReaderRouter from "./routes/SmsReaderRoute.js";
 import webhookRouter from "./routes/webhook.js";
+import sessionRouter from "./routes/sessionRoute.js";
 dotenv.config();
 
 const app = express();
@@ -26,6 +27,7 @@ await connectDB();
 
 app.use("/api/v1", smsReaderRouter);
 app.use("/api/v1", extractionRouter);
+app.use("/api/v1", sessionRouter);
 app.use("/api/v1", webhookRouter);
 
 app.listen(process.env.PORT, () => {
