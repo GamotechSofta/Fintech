@@ -26,7 +26,7 @@ String _authBaseUrlFromEnv() =>
     _normalizeBackendBaseUrl(dotenv.env['BACKEND_URL'] ?? '');
 
 String _smsReaderBaseUrlFromEnv() =>
-    _normalizeBackendBaseUrl(dotenv.env['Backend_URL_LOCAL'] ?? '');
+    _normalizeBackendBaseUrl(dotenv.env['BACKEND_URL_LOCAL'] ?? '');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();

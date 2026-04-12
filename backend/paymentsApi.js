@@ -10,9 +10,9 @@ const normalizeBaseUrl = (raw = "") => {
 };
 
 const resolvePaymentsUrl = () => {
-  const base = normalizeBaseUrl(process.env.Backend_URL || "");
+  const base = normalizeBaseUrl(process.env.BACKEND_URL || "");
   if (!base) {
-    throw new Error("Backend_URL is missing in backend/.env");
+    throw new Error("BACKEND_URL is missing in backend/.env");
   }
   return base.endsWith("/payments/generic") ? base : `${base}/payments/generic`;
 };

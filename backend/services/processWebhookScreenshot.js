@@ -26,14 +26,20 @@ export async function processWebhookScreenshotPayload(payload) {
   const cachedLoginJwt = String(getActiveLoginJwt() || "").trim();
   const requestJwt = String(payload.jwtToken || "").trim();
   const envJwt = String(process.env.PAYMENTS_VERIFY_JWT || "").trim();
-  const verifyJwt = cachedLoginJwt || requestJwt || envJwt;
+  const envDeclareJwt = String(
+    process.env.WEBHOOK_DECLARE_PASSWORD_JWT || "",
+  ).trim();
+  const verifyJwt =
+    cachedLoginJwt || requestJwt || envJwt || envDeclareJwt;
   const jwtSource = cachedLoginJwt
     ? "login_screen_registered"
     : requestJwt
       ? "webhook_request"
       : envJwt
         ? "env_PAYMENTS_VERIFY_JWT"
-        : "none";
+        : envDeclareJwt
+          ? "env_WEBHOOK_DECLARE_PASSWORD_JWT"
+          : "none";
   console.log(`${LOG} JWT source=${jwtSource} (payments verify + approve)`);
 
   console.log(`${LOG} A) OCR start refId=${refId} imageUrlLen=${screenshotUrl.length}`);
@@ -75,7 +81,7 @@ export async function processWebhookScreenshotPayload(payload) {
     console.log(`${LOG} E) payment decision refId=${refId}`, paymentDecision);
   } else {
     console.log(
-      `${LOG} E) approve/reject skipped (no JWT — log in on app or set PAYMENTS_VERIFY_JWT) refId=${refId}`,
+      `${LOG} E) approve/reject skipped (no JWT — log in on app, or set WEBHOOK_DECLARE_PASSWORD_JWT / PAYMENTS_VERIFY_JWT) refId=${refId}`,
     );
   }
 
@@ -95,7 +101,7 @@ export async function processWebhookScreenshotPayload(payload) {
     console.log(`${LOG} C2) payments API verify done refId=${refId}`, paymentsApiVerification);
   } else {
     console.log(
-      `${LOG} C2) payments API verify skipped (no JWT: log in on app, or x-app-jwt / body jwtToken, or PAYMENTS_VERIFY_JWT) refId=${refId}`,
+      `${LOG} C2) payments API verify skipped (no JWT: log in on app, or x-app-jwt / body jwtToken, or PAYMENTS_VERIFY_JWT / WEBHOOK_DECLARE_PASSWORD_JWT) refId=${refId}`,
     );
   }
 

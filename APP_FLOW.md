@@ -102,7 +102,7 @@ Service in `backend/extraction.js`:
 
 | Path | Trigger | Payments `GET`? |
 |------|---------|------------------|
-| **App-driven** | After SMS save, app calls `POST /api/v1/extract/bulk` with `{ "jwtToken": "<JWT>" }` | Yes — backend calls `GET {Backend_URL}/payments/generic` to collect `screenshotUrl` rows, then runs Vision on each image URL. |
+| **App-driven** | After SMS save, app calls `POST /api/v1/extract/bulk` with `{ "jwtToken": "<JWT>" }` | Yes — backend calls `GET {BACKEND_URL}/payments/generic` to collect `screenshotUrl` rows, then runs Vision on each image URL. |
 | **Webhook-driven** | External system calls `POST /api/v1/webhook/screenshot-uploaded` with `screenshotUrl` | Optional — see webhook section (`PAYMENTS_VERIFY_JWT`). |
 
 There is **no Redis or background worker** for the webhook: processing runs **in the same HTTP request** until Vision + DB updates complete (caller may wait several seconds).
@@ -130,13 +130,13 @@ Auto-save behavior:
 ### App (`app/.env`)
 
 - `BACKEND_URL` (main auth/payments API base)
-- `Backend_URL_LOCAL` (local backend base for sms/extract routes)
+- `BACKEND_URL_LOCAL` (local backend base for sms/extract routes)
 
 ### Backend (`backend/.env`)
 
 - `PORT`
 - `MONGODB_URI`
-- `Backend_URL` (payments list base; path `/payments/generic` is appended by `backend/paymentsApi.js` unless the URL already ends with `/payments/generic`)
+- `BACKEND_URL` (payments list base; path `/payments/generic` is appended by `backend/paymentsApi.js` unless the URL already ends with `/payments/generic`)
 - `Google_Vision_API_KEY`
 - `WEBHOOK_SECRET` (must match header `x-webhook-secret` on webhook requests)
 - Webhook HMAC: signing secret is configured in `backend/utils/security.js` (used with header `x-webhook-signature` and raw JSON body)
@@ -191,6 +191,6 @@ flowchart LR
 ## 12) Network Notes
 
 - Backend listens on `0.0.0.0` for device access over LAN.
-- For physical device testing, `Backend_URL_LOCAL` must use current laptop LAN IP.
+- For physical device testing, `BACKEND_URL_LOCAL` must use current laptop LAN IP.
 - If laptop IP changes, update `app/.env` and restart app fully.
 

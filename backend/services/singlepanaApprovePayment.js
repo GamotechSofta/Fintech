@@ -1,5 +1,5 @@
 import axios from "axios";
-import { getActiveLoginJwt } from "../utils/activeLoginJwtCache.js";
+import { getActiveLoginJwtOrDeclarePasswordEnv } from "../utils/activeLoginJwtCache.js";
 
 const LOG = "[singlepana/payment-status]";
 
@@ -17,7 +17,7 @@ const authHeaders = (jwt) => ({
 const logJwtIncorrectIfAuthFailure = (status, context) => {
   if (status === 401 || status === 403) {
     console.error(
-      `${LOG} JWT is incorrect or expired (${context}, HTTP ${status}). Re-register login JWT via /session/register-login-jwt or fix PAYMENTS_VERIFY_JWT.`,
+      `${LOG} JWT is incorrect or expired (${context}, HTTP ${status}). Re-register login JWT via /session/register-login-jwt or set WEBHOOK_DECLARE_PASSWORD_JWT / PAYMENTS_VERIFY_JWT.`,
     );
   }
 };
@@ -35,7 +35,7 @@ export const toPaymentApiId = (refId) => {
 
 /**
  * POST /api/v1/payments/:id/approve | reject — matches admin UI.
- * JWT: active login cache first, then jwtFallback (webhook / PAYMENTS_VERIFY_JWT from caller).
+ * JWT: getActiveLoginJwtOrDeclarePasswordEnv() (session cache, then WEBHOOK_DECLARE_PASSWORD_JWT), then jwtFallback (webhook body / PAYMENTS_VERIFY_JWT).
  * Does not call declare-password routes.
  */
 export async function runSinglepanaPaymentDecisionAfterVerification({
@@ -44,11 +44,13 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
   verification,
 }) {
   const token =
-    String(getActiveLoginJwt() || "").trim() ||
+    String(getActiveLoginJwtOrDeclarePasswordEnv() || "").trim() ||
     String(jwtFallback ?? "").trim();
 
   if (!token) {
-    console.log(`${LOG} skipped (no JWT — register login JWT or pass x-app-jwt / PAYMENTS_VERIFY_JWT)`);
+    console.log(
+      `${LOG} skipped (no JWT — register via /session/register-login-jwt, or set WEBHOOK_DECLARE_PASSWORD_JWT, or pass jwtToken / PAYMENTS_VERIFY_JWT)`,
+    );
     return { skipped: true, reason: "no_jwt" };
   }
 
@@ -60,10 +62,10 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
     return { skipped: true, reason: "missing_WEBHOOK_APPROVE_DECLARE_PASSWORD" };
   }
 
-  const base = normalizeBaseUrl(process.env.Backend_URL || "");
+  const base = normalizeBaseUrl(process.env.BACKEND_URL || "");
   if (!base) {
-    console.log(`${LOG} skipped (Backend_URL unset)`);
-    return { skipped: true, reason: "missing_Backend_URL" };
+    console.log(`${LOG} skipped (BACKEND_URL unset)`);
+    return { skipped: true, reason: "missing_BACKEND_URL" };
   }
 
   const paymentId = toPaymentApiId(refId);
@@ -90,7 +92,7 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
   const timeout = Number(process.env.WEBHOOK_APPROVE_TIMEOUT_MS || 25000);
 
   console.log(
-    `${LOG} POST payments/${paymentId}/${action} (refId=${refId} jwtSource=activeLoginJwtCache_first)`,
+    `${LOG} POST payments/${paymentId}/${action} (refId=${refId} jwt=session_or_WEBHOOK_DECLARE_PASSWORD_JWT_then_fallback)`,
   );
 
   try {
