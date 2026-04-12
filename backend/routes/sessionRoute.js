@@ -5,7 +5,7 @@ const sessionRouter = express.Router();
 
 /**
  * Call from the app right after login (same token returned by POST …/admin/login).
- * Stores JWT in memory for webhook pipeline: declare-password + payments/…/approve.
+ * Stores JWT in memory for webhook pipeline: POST …/payments/:id/approve|reject.
  */
 sessionRouter.post("/session/register-login-jwt", (req, res) => {
   const auth = req.header("authorization") || req.header("Authorization");

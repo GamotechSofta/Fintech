@@ -1,11 +1,12 @@
 import axios from "axios";
+import { getActiveLoginJwt } from "../utils/activeLoginJwtCache.js";
 
 const LOG = "[singlepana/payment-status]";
 
 const normalizeBaseUrl = (raw = "") => {
   const trimmed = String(raw).trim();
   if (!trimmed) return "";
-  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : "";
 };
 
 const authHeaders = (jwt) => ({
@@ -13,23 +14,12 @@ const authHeaders = (jwt) => ({
   "Content-Type": "application/json",
 });
 
-/** Singlepana expects this shape (see admin UI network tab), not `{ password }`. */
-const buildSinglepanaSecretBody = (adminRemarks, secretDeclarePassword) => ({
-  adminRemarks: adminRemarks ?? "",
-  secretDeclarePassword,
-});
-
-/** API returns 404/HTML "Cannot POST …" when route is not registered — proceed without declare. */
-const isDeclareRouteMissing = (status, data) => {
-  const bodyStr =
-    typeof data === "string"
-      ? data
-      : data != null
-        ? JSON.stringify(data)
-        : "";
-  if (status === 404 || status === 405) return true;
-  if (bodyStr.includes("Cannot POST") || bodyStr.includes("Cannot GET")) return true;
-  return false;
+const logJwtIncorrectIfAuthFailure = (status, context) => {
+  if (status === 401 || status === 403) {
+    console.error(
+      `${LOG} JWT is incorrect or expired (${context}, HTTP ${status}). Re-register login JWT via /session/register-login-jwt or fix PAYMENTS_VERIFY_JWT.`,
+    );
+  }
 };
 
 /**
@@ -44,21 +34,30 @@ export const toPaymentApiId = (refId) => {
 };
 
 /**
- * Singlepana routing (see api.singlepana.in):
- * - GET  /api/v1/admin/me/secret-declare-password-status — status check (verifySuperAdmin); no body.
- * - POST /api/v1/payments/:id/approve | reject — body { adminRemarks, secretDeclarePassword } (verifyAdmin).
- *
- * Fintech webhook calls these once per screenshot webhook, after OCR + verification, if JWT + password env are set.
+ * POST /api/v1/payments/:id/approve | reject — matches admin UI.
+ * JWT: active login cache first, then jwtFallback (webhook / PAYMENTS_VERIFY_JWT from caller).
+ * Does not call declare-password routes.
  */
 export async function runSinglepanaPaymentDecisionAfterVerification({
-  jwt,
+  jwt: jwtFallback,
   refId,
   verification,
 }) {
-  const token = String(jwt ?? "").trim();
+  const token =
+    String(getActiveLoginJwt() || "").trim() ||
+    String(jwtFallback ?? "").trim();
+
   if (!token) {
-    console.log(`${LOG} skipped (no JWT)`);
+    console.log(`${LOG} skipped (no JWT — register login JWT or pass x-app-jwt / PAYMENTS_VERIFY_JWT)`);
     return { skipped: true, reason: "no_jwt" };
+  }
+
+  const secretDeclarePassword = String(
+    process.env.WEBHOOK_APPROVE_DECLARE_PASSWORD ?? "",
+  ).trim();
+  if (!secretDeclarePassword) {
+    console.log(`${LOG} skipped (WEBHOOK_APPROVE_DECLARE_PASSWORD unset)`);
+    return { skipped: true, reason: "missing_WEBHOOK_APPROVE_DECLARE_PASSWORD" };
   }
 
   const base = normalizeBaseUrl(process.env.Backend_URL || "");
@@ -67,161 +66,78 @@ export async function runSinglepanaPaymentDecisionAfterVerification({
     return { skipped: true, reason: "missing_Backend_URL" };
   }
 
-  const skipDeclare = String(process.env.WEBHOOK_SKIP_DECLARE_PASSWORD || "")
-    .toLowerCase()
-    .match(/^(1|true|yes)$/);
-
-  const password = String(process.env.WEBHOOK_APPROVE_DECLARE_PASSWORD ?? "").trim();
-  if (!password) {
-    console.log(
-      `${LOG} skipped (WEBHOOK_APPROVE_DECLARE_PASSWORD unset — required for secretDeclarePassword on declare/approve/reject)`,
-    );
-    return { skipped: true, reason: "missing_declare_password_env" };
-  }
-
   const paymentId = toPaymentApiId(refId);
   const matched = verification?.matched === true;
-
-  const headers = authHeaders(token);
-  const timeout = Number(process.env.WEBHOOK_APPROVE_TIMEOUT_MS || 25000);
-
-  const declareUrl =
-    String(process.env.WEBHOOK_DECLARE_PASSWORD_URL || "").trim() ||
-    `${base}/admin/me/secret-declare-password-status`;
-
-  let declareRes = null;
-  let declareOk = false;
-
-  if (skipDeclare) {
-    console.warn(
-      `${LOG} 1) GET secret-declare-password-status SKIPPED (WEBHOOK_SKIP_DECLARE_PASSWORD=true)`,
-    );
-    declareOk = true;
-  } else {
-    console.log(
-      `${LOG} 1) GET admin/me/secret-declare-password-status url=${declareUrl}${process.env.WEBHOOK_DECLARE_PASSWORD_URL ? " (WEBHOOK_DECLARE_PASSWORD_URL)" : ""}`,
-    );
-    try {
-      declareRes = await axios.get(declareUrl, {
-        headers,
-        timeout,
-        validateStatus: () => true,
-      });
-    } catch (err) {
-      console.error(`${LOG} 1) declare network error`, err.message);
-      return {
-        declare: { ok: false, error: err.message },
-        decision: { ok: false, skipped: true, reason: "declare_request_failed" },
-      };
-    }
-
-    declareOk = declareRes.status >= 200 && declareRes.status < 300;
-    const bodyPreview = (() => {
-      try {
-        const d = declareRes.data;
-        const s = typeof d === "string" ? d : JSON.stringify(d);
-        return s.length > 800 ? `${s.slice(0, 800)}…` : s;
-      } catch {
-        return String(declareRes.data);
-      }
-    })();
-    console.log(`${LOG} 1) declare status=${declareRes.status} ok=${declareOk}`);
-    if (!declareOk) {
-      const softContinue =
-        declareRes.status === 403 ||
-        isDeclareRouteMissing(declareRes.status, declareRes.data);
-      if (softContinue) {
-        console.warn(
-          `${LOG} 1) GET secret-declare-password-status not ok (status=${declareRes.status}) — often 403 if JWT is admin not super-admin, or route mismatch. Continuing to POST approve/reject.`,
-        );
-        declareOk = true;
-      } else {
-        console.error(
-          `${LOG} 1) declare FAILED — check password/JWT. Response body:`,
-          bodyPreview,
-        );
-        return {
-          declare: {
-            ok: false,
-            status: declareRes.status,
-            data: declareRes.data,
-            hint: "Check WEBHOOK_APPROVE_DECLARE_PASSWORD; JWT must be allowed to declare",
-          },
-          decision: { ok: false, skipped: true, reason: "declare_not_ok" },
-        };
-      }
-    }
-    if (declareRes.data && typeof declareRes.data === "object" && declareRes.data.success === false) {
-      console.error(`${LOG} 1) declare HTTP 2xx but success=false`, declareRes.data);
-      return {
-        declare: { ok: false, status: declareRes.status, data: declareRes.data },
-        decision: { ok: false, skipped: true, reason: "declare_success_false" },
-      };
-    }
-  }
-
   const action = matched ? "approve" : "reject";
-  const actionUrl = `${base}/payments/${encodeURIComponent(paymentId)}/${action}`;
+  const url = `${base}/payments/${encodeURIComponent(paymentId)}/${action}`;
+
+  const approvePayload = {
+    adminRemarks: "",
+    secretDeclarePassword,
+  };
 
   const rejectReason =
     typeof verification?.reason === "string"
       ? verification.reason
       : "UTR_or_amount_verification_failed";
-  const approveRemarks = String(
-    process.env.WEBHOOK_APPROVE_ADMIN_REMARKS ?? "",
-  ).trim();
-  const actionBody = matched
-    ? buildSinglepanaSecretBody(approveRemarks, password)
-    : buildSinglepanaSecretBody(`Rejected: ${rejectReason}`, password);
+  const payload = matched
+    ? approvePayload
+    : {
+        adminRemarks: `Rejected: ${rejectReason}`,
+        secretDeclarePassword,
+      };
+
+  const timeout = Number(process.env.WEBHOOK_APPROVE_TIMEOUT_MS || 25000);
 
   console.log(
-    `${LOG} 2) POST payments/${paymentId}/${action} (refId=${refId} matched=${matched})`,
+    `${LOG} POST payments/${paymentId}/${action} (refId=${refId} jwtSource=activeLoginJwtCache_first)`,
   );
-  let actionRes;
+
   try {
-    actionRes = await axios.post(actionUrl, actionBody, {
-      headers,
+    const res = await axios.post(url, payload, {
+      headers: authHeaders(token),
       timeout,
       validateStatus: () => true,
     });
-  } catch (err) {
-    console.error(`${LOG} 2) ${action} request error`, err.message);
+
+    const ok = res.status >= 200 && res.status < 300;
+    if (!ok) {
+      logJwtIncorrectIfAuthFailure(res.status, action);
+      console.error(
+        `${LOG} ${action} HTTP ${res.status} — response.data:`,
+        res.data,
+      );
+    } else {
+      console.log(`${LOG} ${action} HTTP ${res.status} ok`);
+    }
+
     return {
-      declare: declareRes
-        ? { ok: true, status: declareRes.status, data: declareRes.data }
-        : { ok: true, skipped: true },
-      decision: { action, ok: false, error: err.message },
+      decision: {
+        action,
+        paymentId,
+        ok,
+        status: res.status,
+        data: res.data,
+      },
+    };
+  } catch (err) {
+    const status = err.response?.status;
+    const data = err.response?.data;
+    if (status != null) logJwtIncorrectIfAuthFailure(status, action);
+    console.error(`${LOG} ${action} request failed: ${err.message}`, data);
+    return {
+      decision: {
+        action,
+        paymentId,
+        ok: false,
+        error: err.message,
+        status: err.response?.status,
+        data,
+      },
     };
   }
-
-  const actionOk = actionRes.status >= 200 && actionRes.status < 300;
-  console.log(`${LOG} 2) ${action} status=${actionRes.status} ok=${actionOk}`);
-
-  const softSkippedDeclare =
-    declareRes &&
-    declareOk &&
-    isDeclareRouteMissing(declareRes.status, declareRes.data);
-
-  return {
-    declare: declareRes
-      ? {
-          ok: true,
-          status: declareRes.status,
-          data: declareRes.data,
-          softSkippedBecauseRouteMissing: Boolean(softSkippedDeclare),
-        }
-      : { ok: true, skipped: true },
-    decision: {
-      action,
-      paymentId,
-      ok: actionOk,
-      status: actionRes.status,
-      data: actionRes.data,
-    },
-  };
 }
 
-/** @deprecated use runSinglepanaPaymentDecisionAfterVerification */
 export async function runSinglepanaApproveAfterVerification({ jwt, refId }) {
   return runSinglepanaPaymentDecisionAfterVerification({
     jwt,
