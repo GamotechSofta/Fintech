@@ -3,8 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'session_store.dart';
 
-/// POST `/session/register-login-jwt` so the Fintech server can use the same JWT
-/// as login for payment approve + declare-password (in-memory on the server).
+/// POST `/session/register-login-jwt` — optional; approve uses WEBHOOK_DECLARE_PASSWORD_JWT on the server.
 Future<void> registerLoginJwtWithFintechBackend() async {
   await SessionStore.load();
   final token = SessionStore.token.trim();

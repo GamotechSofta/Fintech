@@ -24,7 +24,10 @@ const extractAmount = (text = "") => {
 const callVisionAPI = async (imageUrl) => {
   const apiKey = process.env.Google_Vision_API_KEY;
   if (!apiKey) {
-    throw new Error("Google_Vision_API_KEY is missing in backend/.env");
+    console.warn(
+      "[OCR] Google_Vision_API_KEY missing in backend/.env — skipping Vision call",
+    );
+    return null;
   }
 
   if (!imageUrl) {

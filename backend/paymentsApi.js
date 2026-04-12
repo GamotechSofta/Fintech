@@ -15,7 +15,7 @@ const resolvePaymentsUrl = () => {
   const raw = process.env.BACKEND_URL;
 
   if (!raw) {
-    console.warn("⚠️ BACKEND_URL missing, skipping payments API");
+    console.warn("BACKEND_URL missing, skipping API call");
     return null;
   }
 

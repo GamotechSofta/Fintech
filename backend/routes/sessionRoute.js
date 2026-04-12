@@ -4,8 +4,8 @@ import { setActiveLoginJwt } from "../utils/activeLoginJwtCache.js";
 const sessionRouter = express.Router();
 
 /**
- * Call from the app right after login (same token returned by POST …/admin/login).
- * Stores JWT in memory for webhook pipeline: POST …/payments/:id/approve|reject.
+ * Optional: call after app login to cache JWT in memory. Webhook approve/reject uses
+ * WEBHOOK_DECLARE_PASSWORD_JWT from env, not this cache.
  */
 sessionRouter.post("/session/register-login-jwt", (req, res) => {
   const auth = req.header("authorization") || req.header("Authorization");

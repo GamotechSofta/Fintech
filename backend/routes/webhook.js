@@ -123,11 +123,14 @@ webhookRouter.post("/webhook/screenshot-uploaded", async (req, res) => {
       return res.status(200).json({
         success: true,
         refId: payload.refId,
-        extraction: {
-          utr: result.extraction.utr,
-          amount: result.extraction.amount,
-          status: result.extraction.status,
-        },
+        ...(result.error ? { pipelineError: result.error } : {}),
+        extraction: result.extraction
+          ? {
+              utr: result.extraction.utr,
+              amount: result.extraction.amount,
+              status: result.extraction.status,
+            }
+          : null,
         smsMatch: result.smsMatch,
         verification: result.verification,
         paymentsApiVerification: result.paymentsApiVerification,

@@ -6,103 +6,174 @@ import {
   verifySmsReaderWebhookConsistency,
 } from "../utils/smsReaderWebhookMatch.js";
 import { runSinglepanaPaymentDecisionAfterVerification } from "./singlepanaApprovePayment.js";
-import { getActiveLoginJwt } from "../utils/activeLoginJwtCache.js";
 
 const FORWARD_URL = process.env.WEBHOOK_FORWARD_URL;
 
 const LOG = "[webhook/process]";
 
 /**
- * Runs Vision OCR, SMS UTR/amount match, optional payments API verify, optional forward — all in-process (no queue).
+ * Webhook pipeline (no throws): OCR → SMS match + triple verify → payments list verify → approve | reject.
+ * Approve/reject uses WEBHOOK_DECLARE_PASSWORD_JWT + WEBHOOK_APPROVE_DECLARE_PASSWORD only.
  */
 export async function processWebhookScreenshotPayload(payload) {
   const refId = payload.refId;
   const screenshotUrl = String(payload.screenshotUrl || "").trim();
   if (!refId || !screenshotUrl) {
     console.error(`${LOG} ✗ missing refId or screenshotUrl`);
-    throw new Error("refId and screenshotUrl are required");
+    return {
+      error: "missing_refId_or_screenshotUrl",
+      extraction: null,
+      verification: null,
+      smsMatch: null,
+      paymentsApiVerification: null,
+      paymentDecision: null,
+      approveFlow: null,
+    };
   }
 
-  const cachedLoginJwt = String(getActiveLoginJwt() || "").trim();
   const requestJwt = String(payload.jwtToken || "").trim();
-  const envJwt = String(process.env.PAYMENTS_VERIFY_JWT || "").trim();
-  const envDeclareJwt = String(
-    process.env.WEBHOOK_DECLARE_PASSWORD_JWT || "",
-  ).trim();
-  const verifyJwt =
-    cachedLoginJwt || requestJwt || envJwt || envDeclareJwt;
-  const jwtSource = cachedLoginJwt
-    ? "login_screen_registered"
-    : requestJwt
-      ? "webhook_request"
-      : envJwt
-        ? "env_PAYMENTS_VERIFY_JWT"
-        : envDeclareJwt
-          ? "env_WEBHOOK_DECLARE_PASSWORD_JWT"
-          : "none";
-  console.log(`${LOG} JWT source=${jwtSource} (payments verify + approve)`);
+  const paymentsListJwt =
+    String(process.env.WEBHOOK_DECLARE_PASSWORD_JWT || "").trim() ||
+    String(process.env.PAYMENTS_VERIFY_JWT || "").trim() ||
+    requestJwt;
+
+  console.log(
+    `${LOG} payments list JWT: ${paymentsListJwt ? "configured" : "absent"}`,
+  );
 
   console.log(`${LOG} A) OCR start refId=${refId} imageUrlLen=${screenshotUrl.length}`);
-  const extraction = await processOneAndAutoSave({
-    paymentId: refId,
-    imageUrl: screenshotUrl,
-  });
+  let extraction;
+  try {
+    extraction = await processOneAndAutoSave({
+      paymentId: refId,
+      imageUrl: screenshotUrl,
+    });
+  } catch (ocrErr) {
+    console.error(`${LOG} A) OCR failed refId=${refId}`, ocrErr.message);
+    extraction = {
+      paymentId: refId,
+      imageUrl: screenshotUrl,
+      utr: null,
+      amount: null,
+      status: "FAILED",
+    };
+  }
   console.log(`${LOG} A) OCR done refId=${refId}`, {
     status: extraction.status,
     utr: extraction.utr ?? null,
     amount: extraction.amount ?? null,
   });
 
-  console.log(`${LOG} B) SMS reader match start refId=${refId}`);
-  const smsMatch = await matchSmsReaderToWebhookExtraction(extraction, refId);
-  console.log(`${LOG} B) SMS reader match done refId=${refId}`, smsMatch);
+  let smsMatch;
+  try {
+    console.log(`${LOG} B) SMS reader match start refId=${refId}`);
+    smsMatch = await matchSmsReaderToWebhookExtraction(extraction, refId);
+    console.log(`${LOG} B) SMS reader match done refId=${refId}`, smsMatch);
+  } catch (e) {
+    console.error(`${LOG} B) SMS match error refId=${refId}`, e.message);
+    smsMatch = { matched: false, error: e.message };
+  }
 
-  console.log(
-    `${LOG} C) UTR + triple amount verify (payload vs extracted vs SmsReader) refId=${refId}`,
-  );
-  const verification = await verifySmsReaderWebhookConsistency(
-    extraction,
-    payload,
-    refId,
-    smsMatch,
-  );
-  console.log(`${LOG} C) triple verify done refId=${refId}`, verification);
-
-  let paymentDecision = null;
-  if (verifyJwt) {
+  let verification;
+  try {
     console.log(
-      `${LOG} E) Singlepana payment status: approve if verification matched, else reject refId=${refId}`,
+      `${LOG} C) UTR + triple amount verify refId=${refId}`,
     );
-    paymentDecision = await runSinglepanaPaymentDecisionAfterVerification({
-      jwt: verifyJwt,
+    verification = await verifySmsReaderWebhookConsistency(
+      extraction,
+      payload,
       refId,
-      verification,
-    });
-    console.log(`${LOG} E) payment decision refId=${refId}`, paymentDecision);
-  } else {
-    console.log(
-      `${LOG} E) approve/reject skipped (no JWT — log in on app, or set WEBHOOK_DECLARE_PASSWORD_JWT / PAYMENTS_VERIFY_JWT) refId=${refId}`,
+      smsMatch,
     );
+    console.log(`${LOG} C) triple verify done refId=${refId}`, verification);
+  } catch (e) {
+    console.error(`${LOG} C) verify error refId=${refId}`, e.message);
+    verification = {
+      matched: false,
+      reason: "verification_exception",
+      error: e.message,
+    };
   }
 
   let paymentsApiVerification = null;
-  if (verifyJwt) {
-    console.log(
-      `${LOG} C2) optional payments list API verify refId=${refId} jwtConfigured=true`,
+  if (!paymentsListJwt) {
+    console.warn(
+      `${LOG} C2) payments API verify skipped (set WEBHOOK_DECLARE_PASSWORD_JWT or PAYMENTS_VERIFY_JWT or pass jwtToken) refId=${refId}`,
     );
-    paymentsApiVerification = await verifyPaymentAgainstApi({
-      jwtToken: verifyJwt,
-      screenshotUrl,
-      extractedUtr: extraction.utr,
-      extractedAmount: extraction.amount,
-      payloadAmount: payload.amount,
-      payloadUtr: payload.utr,
-    });
-    console.log(`${LOG} C2) payments API verify done refId=${refId}`, paymentsApiVerification);
+    paymentsApiVerification = { skipped: true, reason: "no_jwt" };
   } else {
-    console.log(
-      `${LOG} C2) payments API verify skipped (no JWT: log in on app, or x-app-jwt / body jwtToken, or PAYMENTS_VERIFY_JWT / WEBHOOK_DECLARE_PASSWORD_JWT) refId=${refId}`,
+    try {
+      console.log(`${LOG} C2) payments list API verify refId=${refId}`);
+      paymentsApiVerification = await verifyPaymentAgainstApi({
+        jwtToken: paymentsListJwt,
+        screenshotUrl,
+        extractedUtr: extraction.utr,
+        extractedAmount: extraction.amount,
+        payloadAmount: payload.amount,
+        payloadUtr: payload.utr,
+      });
+      console.log(
+        `${LOG} C2) payments API verify done refId=${refId}`,
+        paymentsApiVerification,
+      );
+    } catch (e) {
+      console.error(`${LOG} C2) payments API verify error refId=${refId}`, e.message);
+      paymentsApiVerification = {
+        matched: false,
+        reason: "payments_verify_exception",
+        error: e.message,
+      };
+    }
+  }
+
+  const smsOk = verification?.matched === true;
+  const paymentsRan =
+    paymentsApiVerification &&
+    paymentsApiVerification.skipped !== true;
+  const paymentsOk =
+    paymentsRan && paymentsApiVerification.matched === true;
+
+  let paymentDecision = null;
+  if (!paymentsRan) {
+    console.warn(
+      `${LOG} E) approve/reject skipped (payments API did not run) refId=${refId}`,
     );
+    paymentDecision = {
+      skipped: true,
+      reason: "payments_api_not_run",
+    };
+  } else {
+    const finalMatched = smsOk && paymentsOk;
+    let decisionReason = null;
+    if (!finalMatched) {
+      if (!smsOk) decisionReason = verification?.reason || "sms_verification_failed";
+      else decisionReason =
+        paymentsApiVerification?.reason ||
+        (paymentsApiVerification?.issues?.length
+          ? paymentsApiVerification.issues.join(",")
+          : "payments_api_mismatch");
+    }
+
+    try {
+      console.log(
+        `${LOG} E) payment decision refId=${refId} finalMatched=${finalMatched}`,
+      );
+      paymentDecision = await runSinglepanaPaymentDecisionAfterVerification({
+        refId,
+        verification: {
+          matched: finalMatched,
+          reason: decisionReason || undefined,
+        },
+      });
+      console.log(`${LOG} E) done refId=${refId}`, paymentDecision);
+    } catch (e) {
+      console.error(`${LOG} E) payment decision error refId=${refId}`, e.message);
+      paymentDecision = {
+        skipped: true,
+        reason: "payment_decision_exception",
+        error: e.message,
+      };
+    }
   }
 
   if (FORWARD_URL) {
@@ -118,7 +189,6 @@ export async function processWebhookScreenshotPayload(payload) {
         `${LOG} D) forward FAILED refId=${refId} message=${forwardErr.message}`,
         forwardErr.response?.status,
       );
-      throw forwardErr;
     }
   } else {
     console.log(`${LOG} D) forward skipped (WEBHOOK_FORWARD_URL unset) refId=${refId}`);
