@@ -47,6 +47,7 @@ export async function processWebhookScreenshotPayload(payload) {
     extraction = await processOneAndAutoSave({
       paymentId: refId,
       imageUrl: screenshotUrl,
+      fallbackAmount: payload.amount,
     });
   } catch (ocrErr) {
     console.error(`${LOG} A) OCR failed refId=${refId}`, ocrErr.message);
@@ -67,7 +68,7 @@ export async function processWebhookScreenshotPayload(payload) {
   let smsMatch;
   try {
     console.log(`${LOG} B) SMS reader match start refId=${refId}`);
-    smsMatch = await matchSmsReaderToWebhookExtraction(extraction, refId);
+    smsMatch = await matchSmsReaderToWebhookExtraction(extraction, refId, payload);
     console.log(`${LOG} B) SMS reader match done refId=${refId}`, smsMatch);
   } catch (e) {
     console.error(`${LOG} B) SMS match error refId=${refId}`, e.message);

@@ -13,12 +13,63 @@ const extractUTR = (text = "") => {
   return match ? match[0] : null;
 };
 
-const extractAmount = (text = "") => {
-  const match = text.match(/(?:₹|Rs\.?|INR)\s?([0-9,]+(?:\.\d{1,2})?)/i);
-  if (!match || !match[1]) return null;
-  const normalized = match[1].replaceAll(",", "");
+const parseAmountCandidate = (raw = "") => {
+  if (!raw) return null;
+  const normalized = String(raw)
+    .replace(/[,\s]/g, "")
+    .replace(/[^\d.]/g, "");
+  if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return null;
   const value = Number(normalized);
-  return Number.isFinite(value) ? value : null;
+  if (!Number.isFinite(value) || value <= 0) return null;
+  // Ignore 12+ digit integers which are likely UTR/reference numbers.
+  if (!normalized.includes(".") && normalized.length >= 12) return null;
+  return value;
+};
+
+const scanAmountFromText = (text = "", patterns = []) => {
+  for (const pattern of patterns) {
+    const regex = new RegExp(pattern.source, pattern.flags);
+    let m;
+    while ((m = regex.exec(text)) !== null) {
+      const value = parseAmountCandidate(m[1]);
+      if (value != null) return value;
+    }
+  }
+  return null;
+};
+
+const extractAmount = (text = "") => {
+  const source = String(text || "");
+  if (!source.trim()) return null;
+
+  const currencyPatterns = [
+    /(?:₹|rs\.?|inr)\s*[:\-]?\s*([0-9][0-9,\s]{0,12}(?:\.\d{1,2})?)/gi,
+    /([0-9][0-9,\s]{0,12}(?:\.\d{1,2})?)\s*(?:₹|rs\.?|inr)\b/gi,
+  ];
+
+  // Prefer values near UTR line (usually the transaction amount in these screenshots).
+  const lines = source
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const utrLineIndex = lines.findIndex((line) => /\butr\b/i.test(line));
+  if (utrLineIndex !== -1) {
+    const start = Math.max(0, utrLineIndex - 3);
+    const end = Math.min(lines.length - 1, utrLineIndex + 3);
+    const localText = lines.slice(start, end + 1).join("\n");
+    const nearbyValue = scanAmountFromText(localText, currencyPatterns);
+    if (nearbyValue != null) return nearbyValue;
+  }
+
+  const currencyValue = scanAmountFromText(source, currencyPatterns);
+  if (currencyValue != null) return currencyValue;
+
+  const keywordValue = scanAmountFromText(source, [
+    /(?:amount|amt|credited|credit|received|deposit(?:ed)?)\s*[:\-]?\s*(?:₹|rs\.?|inr)?\s*([0-9][0-9,\s]{0,12}(?:\.\d{1,2})?)/gi,
+  ]);
+  if (keywordValue != null) return keywordValue;
+
+  return null;
 };
 
 const callVisionAPI = async (imageUrl) => {
@@ -75,23 +126,33 @@ const callVisionAPI = async (imageUrl) => {
   }
 };
 
-const processOne = async ({ paymentId = "", imageUrl = "" }) => {
+const processOne = async ({ paymentId = "", imageUrl = "", fallbackAmount = undefined }) => {
   console.log("[OCR] Processing item:", { paymentId, imageUrl });
   const fullText = await callVisionAPI(imageUrl);
   if (!fullText) {
+    const numericFallbackAmount = Number(fallbackAmount);
+    const amount =
+      Number.isFinite(numericFallbackAmount) ? numericFallbackAmount : null;
     console.log("[OCR] Marking FAILED: OCR text missing", { paymentId, imageUrl });
     return {
       paymentId,
       imageUrl,
       utr: null,
-      amount: null,
+      amount,
       status: "FAILED",
     };
   }
 
   const utr = extractUTR(fullText);
-  const amount = extractAmount(fullText);
-  const status = utr && amount !== null ? "SUCCESS" : "FAILED";
+  const amountFromOcr = extractAmount(fullText);
+  const numericFallbackAmount = Number(fallbackAmount);
+  const amount =
+    amountFromOcr !== null
+      ? amountFromOcr
+      : Number.isFinite(numericFallbackAmount)
+        ? numericFallbackAmount
+        : null;
+  const status = utr && amountFromOcr !== null ? "SUCCESS" : "FAILED";
 
   const result = {
     paymentId,
