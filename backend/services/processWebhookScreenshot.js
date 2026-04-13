@@ -108,10 +108,8 @@ export async function processWebhookScreenshotPayload(payload) {
       paymentsApiVerification = await verifyPaymentAgainstApi({
         jwtToken: paymentsListJwt,
         screenshotUrl,
-        extractedUtr: extraction.utr,
         extractedAmount: extraction.amount,
         payloadAmount: payload.amount,
-        payloadUtr: payload.utr,
       });
       console.log(
         `${LOG} C2) payments API verify done refId=${refId}`,

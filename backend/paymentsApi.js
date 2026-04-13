@@ -102,10 +102,8 @@ export const fetchPaymentsAmountAndScreenshot = async (jwtToken) => {
 export const verifyPaymentAgainstApi = async ({
   jwtToken,
   screenshotUrl,
-  extractedUtr,
   extractedAmount,
   payloadAmount,
-  payloadUtr,
 }) => {
   const token = String(jwtToken ?? "").trim();
 
@@ -162,25 +160,6 @@ export const verifyPaymentAgainstApi = async ({
       !amountsClose(payloadAmount, apiAmount)
     ) {
       issues.push("payload_amount_vs_api_mismatch");
-    }
-
-    // UTR checks
-    const normUtr = (s) => {
-      if (!s) return null;
-      const m = String(s).replace(/\D/g, "").match(/\d{12}/);
-      return m ? m[0] : null;
-    };
-
-    const apiUtr = normUtr(row.utr);
-    const extUtr = normUtr(extractedUtr);
-    const payUtr = normUtr(payloadUtr);
-
-    if (extUtr && apiUtr && extUtr !== apiUtr) {
-      issues.push("extracted_utr_vs_api_mismatch");
-    }
-
-    if (payUtr && extUtr && payUtr !== extUtr) {
-      issues.push("payload_utr_vs_extracted_mismatch");
     }
 
     const result = {

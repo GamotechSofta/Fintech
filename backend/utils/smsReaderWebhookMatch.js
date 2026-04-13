@@ -17,7 +17,7 @@ const normalize12DigitUtr = (value) => {
 };
 
 /**
- * After OCR + smsMatch: require extracted UTR === SmsReader.utrNo and
+ * After OCR + smsMatch: require OCR-extracted UTR === SmsReader.utrNo and
  * payload amount === extracted amount === SmsReader amount (all within tolerance).
  */
 export async function verifySmsReaderWebhookConsistency(extraction, payload, refId, smsMatch) {
@@ -37,17 +37,15 @@ export async function verifySmsReaderWebhookConsistency(extraction, payload, ref
   }
 
   const extractedUtr = normalize12DigitUtr(extraction?.utr);
-  const payloadUtr = normalize12DigitUtr(payload?.utr);
-  const effectiveUtr = extractedUtr || payloadUtr;
   const smsUtr = String(doc.utrNo || "").trim();
-  if (!effectiveUtr || effectiveUtr !== smsUtr) {
+  if (!extractedUtr || extractedUtr !== smsUtr) {
     console.log(
-      `${LOG} verify triple ✗ refId=${refId} UTR mismatch extracted=${extractedUtr} payload=${payloadUtr} smsReader=${smsUtr}`,
+      `${LOG} verify triple ✗ refId=${refId} UTR mismatch extracted=${extractedUtr} smsReader=${smsUtr}`,
     );
     return {
       matched: false,
       reason: "utr_extracted_vs_sms_reader_mismatch",
-      extractedUtr: effectiveUtr,
+      extractedUtr,
       smsReaderUtr: smsUtr,
     };
   }
@@ -96,11 +94,11 @@ export async function verifySmsReaderWebhookConsistency(extraction, payload, ref
   const ps = sameAmount(payloadAmount, smsReaderAmount);
   if (pe && ps) {
     console.log(
-      `${LOG} verify triple ✓ refId=${refId} utr=${effectiveUtr} amount=${effectiveAmount} (payload/effective/SMS matched)`,
+      `${LOG} verify triple ✓ refId=${refId} utr=${extractedUtr} amount=${effectiveAmount} (payload/effective/SMS matched)`,
     );
     return {
       matched: true,
-      utr: effectiveUtr,
+      utr: extractedUtr,
       payloadAmount,
       extractedAmount: effectiveAmount,
       smsReaderAmount,
@@ -128,8 +126,6 @@ export async function verifySmsReaderWebhookConsistency(extraction, payload, ref
  */
 export async function matchSmsReaderToWebhookExtraction(extraction, refId = "n/a", payload = {}) {
   const extractedUtr = normalize12DigitUtr(extraction?.utr);
-  const payloadUtr = normalize12DigitUtr(payload?.utr);
-  const utr = extractedUtr || payloadUtr;
   const extractedAmount = Number(extraction?.amount);
   const payloadAmount = Number(payload?.amount);
   const amount = Number.isFinite(extractedAmount)
@@ -138,9 +134,9 @@ export async function matchSmsReaderToWebhookExtraction(extraction, refId = "n/a
       ? payloadAmount
       : null;
 
-  if (!utr) {
+  if (!extractedUtr) {
     console.log(
-      `${LOG} ✗ refId=${refId} reason=invalid_or_missing_utr extracted=${String(extraction?.utr)} payload=${String(payload?.utr)}`,
+      `${LOG} ✗ refId=${refId} reason=invalid_or_missing_utr extracted=${String(extraction?.utr)}`,
     );
     return { matched: false, reason: "invalid_or_missing_utr" };
   }
@@ -151,7 +147,7 @@ export async function matchSmsReaderToWebhookExtraction(extraction, refId = "n/a
     return { matched: false, reason: "invalid_or_missing_amount" };
   }
 
-  const normalizedUtr = String(utr).trim();
+  const normalizedUtr = String(extractedUtr).trim();
   const doc = await SmsReader.findOne({ utrNo: normalizedUtr });
   if (!doc) {
     console.log(`${LOG} ✗ refId=${refId} reason=no_sms_row_for_utr utr=${normalizedUtr}`);

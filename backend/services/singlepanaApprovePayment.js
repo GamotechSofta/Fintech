@@ -46,10 +46,6 @@ const REJECTION_REASON_MESSAGES = {
     "The amount in the screenshot does not match our payment record.",
   payload_amount_vs_api_mismatch:
     "The submitted amount does not match our payment record.",
-  extracted_utr_vs_api_mismatch:
-    "The UTR in the screenshot does not match our payment record.",
-  payload_utr_vs_extracted_mismatch:
-    "The UTR in the request does not match the UTR in the screenshot.",
   verification_error:
     "Payment verification could not be completed due to a temporary server issue.",
   verification_exception:
