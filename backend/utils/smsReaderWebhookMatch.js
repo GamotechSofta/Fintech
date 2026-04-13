@@ -154,6 +154,14 @@ export async function matchSmsReaderToWebhookExtraction(extraction, refId = "n/a
     return { matched: false, reason: "no_sms_row_for_utr" };
   }
 
+  // Prevent approving duplicate transactions for an already-used UTR.
+  if (doc.check === true) {
+    console.log(
+      `${LOG} ✗ refId=${refId} reason=duplicate_utr_reference utr=${normalizedUtr} smsReaderId=${doc._id}`,
+    );
+    return { matched: false, reason: "duplicate_utr_reference" };
+  }
+
   if (!sameAmount(amount, doc.amount)) {
     console.log(
       `${LOG} ✗ refId=${refId} reason=amount_mismatch extracted=${amount} smsRow.amount=${doc.amount} utr=${normalizedUtr}`,

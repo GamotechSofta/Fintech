@@ -36,6 +36,8 @@ const REJECTION_REASON_MESSAGES = {
     "Could not verify this payment because amount is missing or invalid in the screenshot.",
   no_sms_row_for_utr:
     "No matching SMS transaction was found for the provided UTR.",
+  duplicate_utr_reference:
+    "Transaction rejected due to duplicate UTR reference.",
   amount_mismatch:
     "The submitted amount does not match the amount in the SMS transaction.",
   empty_list:
@@ -79,6 +81,9 @@ const getReasonCodes = (rawReason) => {
 
 const buildRejectionAdminRemarks = (rawReason) => {
   const reasonCodes = getReasonCodes(rawReason);
+  if (reasonCodes.length === 1 && reasonCodes[0] === "duplicate_utr_reference") {
+    return "Transaction rejected due to duplicate UTR reference.";
+  }
   const rendered = reasonCodes.map((code) => {
     const message = REJECTION_REASON_MESSAGES[code] || `${humanizeReasonCode(code)}.`;
     return `${message} [code: ${code}]`;
